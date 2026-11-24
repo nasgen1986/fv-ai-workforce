@@ -58,6 +58,33 @@ async function handleApi(request, env, url) {
   const parts = path.split("/").filter(Boolean);
 
   try {
+    if (parts[1] === "ai" && parts[2] === "test" && parts.length === 3) {
+      if (method !== "POST") {
+        return json({ ok: false, error: "Method not allowed. Use POST." }, 405);
+      }
+      if (!env.AI || typeof env.AI.run !== "function") {
+        return json({ ok: false, error: "Workers AI binding is unavailable." }, 503);
+      }
+
+      const model = "@cf/google/gemma-4-26b-a4b-it";
+      const result = await env.AI.run(model, {
+        messages: [
+          {
+            role: "user",
+            content: "Reply with exactly this sentence and nothing else: FV AI connection successful."
+          }
+        ],
+        max_tokens: 40
+      });
+
+      return json({
+        ok: true,
+        test: "ai_inference",
+        model,
+        response: result?.response ?? result,
+        usage: result?.usage ?? null
+      });
+    }
     if (parts[1] === "workers" && parts.length === 2) {
       if (method === "GET") {
         const result = await env.DB.prepare(

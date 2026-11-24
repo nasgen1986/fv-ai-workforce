@@ -521,7 +521,7 @@ async function handleApi(request, env, url) {
 
       if (typeof content !== "string" || !content.trim()) {
         await env.DB.prepare(
-          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'in_progress'"
+          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ? AND status = 'in_progress'"
         ).bind(taskId).run();
         await recordEvent(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
           reason: "AI returned no usable text",

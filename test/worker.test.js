@@ -881,3 +881,29 @@ test("manual submission rejects a duplicate pending submission without writing a
   assert.equal(batchCalled, true);
   assert.match((await response.json()).error, /another submission is already awaiting review/i);
 });
+
+
+test("worker credential lookup failure returns a generic 503", async () => {
+  const db = {
+    prepare() {
+      return {
+        bind() {
+          return {
+            first: async () => { throw new Error("sensitive database internals"); }
+          };
+        }
+      };
+    }
+  };
+  const response = await call("/api/workers/worker-1/tasks", {
+    token: "w".repeat(43),
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db }
+  });
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.deepEqual(body, {
+    ok: false,
+    error: "Authentication service unavailable."
+  });
+  assert.equal(JSON.stringify(body).includes("sensitive database internals"), false);
+});

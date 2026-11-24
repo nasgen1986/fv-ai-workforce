@@ -478,24 +478,34 @@ async function handleApi(request, env, url) {
         return json({ ok: false, error: "Task is no longer available to run." }, 409);
       }
 
-      if (executionApproval) {
-        const consumed = await env.DB.prepare(
-          "UPDATE approval_requests SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'approved' AND consumed_at IS NULL"
-        ).bind(executionApproval.id).run();
-        if (consumed.meta?.changes === 0) {
-          await env.DB.prepare(
-            "UPDATE tasks SET status = 'assigned', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'in_progress' AND assigned_worker_id = ?"
-          ).bind(taskId, worker.id).run();
-          return json({ ok: false, error: "The manager approval was already used or is no longer available. Request a new approval." }, 409);
-        }
-        await recordEvent(env.DB, taskId, "system", "approval_gate", "execution_approval_consumed", {
-          approval_id: executionApproval.id
-        });
+      // Consume the approval and write both audit events in one D1 transaction.
+      // If any audit write fails, D1 rolls back the approval consumption as well.
+      let executionStarted;
+      try {
+        executionStarted = await env.DB.batch([
+          env.DB.prepare(
+            "UPDATE approval_requests SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'approved' AND consumed_at IS NULL"
+          ).bind(executionApproval.id),
+          env.DB.prepare(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'system', 'approval_gate', 'execution_approval_consumed', ? WHERE EXISTS (SELECT 1 FROM approval_requests WHERE id = ? AND consumed_at IS NOT NULL)"
+          ).bind(taskId, JSON.stringify({ approval_id: executionApproval.id }), executionApproval.id),
+          env.DB.prepare(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'worker', ?, 'ai_task_started', ? WHERE EXISTS (SELECT 1 FROM approval_requests WHERE id = ? AND consumed_at IS NOT NULL)"
+          ).bind(taskId, worker.id, JSON.stringify({ model: "@cf/google/gemma-4-26b-a4b-it" }), executionApproval.id)
+        ]);
+      } catch {
+        await env.DB.prepare(
+          "UPDATE tasks SET status = 'assigned', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'in_progress' AND assigned_worker_id = ?"
+        ).bind(taskId, worker.id).run();
+        return json({ ok: false, error: "Execution could not be safely initialized. No AI work was started; request a fresh approval if needed." }, 500);
       }
 
-      await recordEvent(env.DB, taskId, "worker", worker.id, "ai_task_started", {
-        model: "@cf/google/gemma-4-26b-a4b-it"
-      });
+      if (executionStarted?.[0]?.meta?.changes === 0) {
+        await env.DB.prepare(
+          "UPDATE tasks SET status = 'assigned', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'in_progress' AND assigned_worker_id = ?"
+        ).bind(taskId, worker.id).run();
+        return json({ ok: false, error: "The manager approval was already used or is no longer available. Request a new approval." }, 409);
+      }
 
       let result;
       try {

@@ -260,64 +260,98 @@ async function handleApi(request, env, url) {
 
       if (method === "PATCH") {
         const body = await request.json();
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return json({ ok: false, error: "A JSON object is required." }, 400);
+        }
+        const allowedKeys = new Set(["status", "priority", "assigned_worker_id"]);
+        if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+          return json({ ok: false, error: "Unsupported task update field." }, 400);
+        }
+        if (Object.keys(body).length === 0) {
+          return json({ ok: false, error: "At least one task field must be supplied." }, 400);
+        }
+
         const current = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first();
         if (!current) return json({ ok: false, error: "Task not found." }, 404);
 
-        const nextStatus = body?.status ?? current.status;
-        const nextPriority = body?.priority ?? current.priority;
-        const nextWorker = body?.assigned_worker_id === undefined
-          ? current.assigned_worker_id
-          : body.assigned_worker_id;
-
+        const nextStatus = body.status ?? current.status;
+        const nextPriority = body.priority ?? current.priority;
         if (!TASK_STATUSES.has(nextStatus)) return json({ ok: false, error: "Invalid task status." }, 400);
         if (!PRIORITIES.has(nextPriority)) return json({ ok: false, error: "Invalid task priority." }, 400);
 
-        // Successful completion must only happen through the submission review route.
-        // This prevents a generic task PATCH from bypassing manager acceptance.
-        if (nextStatus === "completed" && current.status !== "completed") {
+        // Status transitions that have dedicated workflow routes cannot be bypassed here.
+        const allowedTransitions = {
+          pending: ["cancelled"],
+          assigned: ["pending", "cancelled"],
+          failed: ["assigned", "cancelled"],
+          waiting_approval: ["cancelled"],
+          in_progress: [],
+          completed: [],
+          cancelled: []
+        };
+        if (nextStatus !== current.status &&
+            !allowedTransitions[current.status]?.includes(nextStatus)) {
           return json({
             ok: false,
-            error: "A task can only be completed by accepting a submitted work item."
+            error: "That task status transition is not allowed. Assignment, execution, review, and completion must use their dedicated workflow routes."
           }, 409);
         }
 
-        if (nextWorker !== null) {
-          if (typeof nextWorker !== "string") return json({ ok: false, error: "Invalid worker id." }, 400);
-          const worker = await env.DB.prepare("SELECT id, status FROM workers WHERE id = ?").bind(nextWorker).first();
-          if (!worker) return json({ ok: false, error: "Assigned worker not found." }, 404);
-          if (worker.status !== "active") return json({ ok: false, error: "Worker must be active before assignment." }, 409);
+        let nextWorker = current.assigned_worker_id;
+        if (Object.prototype.hasOwnProperty.call(body, "assigned_worker_id")) {
+          if (body.assigned_worker_id !== null ||
+              current.status !== "assigned" ||
+              nextStatus !== "pending") {
+            return json({
+              ok: false,
+              error: "Workers can only be unassigned when an assigned task is returned to pending. Use the dispatcher to assign workers."
+            }, 409);
+          }
+          nextWorker = null;
+        }
+        if (current.status === "assigned" && nextStatus === "pending" &&
+            !Object.prototype.hasOwnProperty.call(body, "assigned_worker_id")) {
+          nextWorker = null;
         }
 
-        // completed_at records successful completion only, not failure or cancellation.
-        const completedAt = nextStatus === "completed"
-          ? (current.completed_at || new Date().toISOString())
-          : null;
-
-        await env.DB.prepare(
-          "UPDATE tasks SET status = ?, priority = ?, assigned_worker_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = ? WHERE id = ?"
-        ).bind(nextStatus, nextPriority, nextWorker, completedAt, taskId).run();
-
-        if (nextStatus !== current.status) {
-          await recordEvent(env.DB, taskId, "manager", "manager", "status_changed", {
-            from: current.status,
-            to: nextStatus
-          });
+        // A failed task may be reset for retry, but execution still requires a fresh,
+        // unused task_execution approval in the dedicated run route.
+        if (current.status === "failed" && nextStatus === "assigned") {
+          if (typeof current.assigned_worker_id !== "string" || !current.assigned_worker_id) {
+            return json({ ok: false, error: "A failed task needs an assigned worker before it can be reset." }, 409);
+          }
+          const worker = await env.DB.prepare(
+            "SELECT id, status FROM workers WHERE id = ?"
+          ).bind(current.assigned_worker_id).first();
+          if (!worker || worker.status !== "active") {
+            return json({ ok: false, error: "The assigned worker must be active before a failed task can be reset." }, 409);
+          }
         }
-        if (nextWorker !== current.assigned_worker_id) {
-          await recordEvent(env.DB, taskId, "manager", "manager", "worker_assigned", {
-            from: current.assigned_worker_id,
-            to: nextWorker
-          });
-        }
-        if (nextPriority !== current.priority) {
-          await recordEvent(env.DB, taskId, "manager", "manager", "priority_changed", {
-            from: current.priority,
-            to: nextPriority
-          });
+
+        const completedAt = nextStatus === "completed" ? current.completed_at : null;
+        const changes = {
+          status: { from: current.status, to: nextStatus },
+          priority: { from: current.priority, to: nextPriority },
+          assigned_worker_id: { from: current.assigned_worker_id, to: nextWorker }
+        };
+
+        // Task update and audit event are committed together. The status predicate
+        // prevents a stale read from overwriting a concurrent workflow transition.
+        const result = await env.DB.batch([
+          env.DB.prepare(
+            "UPDATE tasks SET status = ?, priority = ?, assigned_worker_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = ? WHERE id = ? AND status = ?"
+          ).bind(nextStatus, nextPriority, nextWorker, completedAt, taskId, current.status),
+          env.DB.prepare(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'manager', 'manager', 'task_updated', ? WHERE changes() = 1"
+          ).bind(taskId, JSON.stringify(changes))
+        ]);
+        if (result?.[0]?.meta?.changes === 0) {
+          return json({ ok: false, error: "Task changed while this update was being processed. Refresh and try again." }, 409);
         }
 
         const updated = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first();
         return json({ ok: true, task: updated });
+      }
       }
     }
 
@@ -679,27 +713,33 @@ async function handleApi(request, env, url) {
       if (current.task_status !== "in_progress") {
         return json({ ok: false, error: "Only submissions for an in-progress task can be reviewed." }, 409);
       }
-      const update = await env.DB.prepare(
-        "UPDATE task_submissions SET status = ?, reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), review_note = ? WHERE id = ? AND status = 'submitted'"
-      ).bind(status, reviewNote.trim(), submissionId).run();
-      if (update.meta?.changes === 0) {
-        return json({ ok: false, error: "This submission has already been reviewed." }, 409);
+
+      // D1 batch runs transactionally. The submission claim, task transition, and
+      // audit record are linked with changes() so a duplicate review cannot win.
+      const reviewed = await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE task_submissions SET status = ?, reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), review_note = ? WHERE id = ? AND status = 'submitted' AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = 'in_progress')"
+        ).bind(status, reviewNote.trim(), submissionId, current.task_id),
+        env.DB.prepare(
+          "UPDATE tasks SET status = CASE WHEN ? = 'accepted' THEN 'completed' ELSE 'in_progress' END, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = CASE WHEN ? = 'accepted' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END WHERE id = ? AND status = 'in_progress' AND changes() = 1"
+        ).bind(status, status, current.task_id),
+        env.DB.prepare(
+          "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'manager', 'manager', 'submission_reviewed', ? WHERE changes() = 1"
+        ).bind(current.task_id, JSON.stringify({
+          submission_id: submissionId,
+          status,
+          review_note: reviewNote.trim()
+        }))
+      ]);
+      if (reviewed?.[0]?.meta?.changes === 0) {
+        return json({ ok: false, error: "This submission was already reviewed or its task is no longer in progress." }, 409);
+      }
+      if (reviewed?.[1]?.meta?.changes === 0) {
+        // This should not occur inside a serialized D1 batch after the guarded
+        // submission update. Treat it as a server-side consistency failure.
+        return json({ ok: false, error: "Review could not complete the task transition. Please inspect the task before retrying." }, 500);
       }
 
-      if (status === "accepted") {
-        await env.DB.prepare(
-          "UPDATE tasks SET status = 'completed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = ? WHERE id = ?"
-        ).bind(new Date().toISOString(), current.task_id).run();
-      } else {
-        await env.DB.prepare(
-          "UPDATE tasks SET status = 'in_progress', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ?"
-        ).bind(current.task_id).run();
-      }
-      await recordEvent(env.DB, current.task_id, "manager", "manager", "submission_reviewed", {
-        submission_id: submissionId,
-        status,
-        review_note: reviewNote.trim()
-      });
       const submission = await env.DB.prepare(
         "SELECT * FROM task_submissions WHERE id = ?"
       ).bind(submissionId).first();

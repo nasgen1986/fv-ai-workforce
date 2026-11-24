@@ -407,6 +407,12 @@ async function handleApi(request, env, url) {
     }
 
     if (parts[1] === "tasks" && parts.length === 4 && parts[3] === "run" && method === "POST") {
+      // AI execution stays globally disabled unless a manager explicitly enables the test/production gate.
+      // Keep this OFF by default; no AI inference is allowed merely because a task has an approval.
+      if (env.AI_EXECUTION_ENABLED !== "true") {
+        return json({ ok: false, error: "AI execution is disabled. Explicit authorization is required before enabling AI inference." }, 403);
+      }
+
       const taskId = parts[2];
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first();
       if (!task) return json({ ok: false, error: "Task not found." }, 404);
@@ -417,17 +423,16 @@ async function handleApi(request, env, url) {
         return json({ ok: false, error: "Only assigned tasks can be run. This prevents accidental duplicate AI runs." }, 409);
       }
 
-      let executionApproval = null;
-      if (task.requires_approval === 1) {
-        executionApproval = await env.DB.prepare(
-          "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' AND consumed_at IS NULL ORDER BY decided_at DESC LIMIT 1"
-        ).bind(taskId).first();
-        if (!executionApproval) {
-          return json({
-            ok: false,
-            error: "A current, unused manager approval is required before this task can execute. Approve a task_execution request for this exact task."
-          }, 403);
-        }
+      // Every AI execution requires a single-use approval for this exact task,
+      // even when the task's general requires_approval setting is explicitly false.
+      const executionApproval = await env.DB.prepare(
+        "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' AND consumed_at IS NULL ORDER BY decided_at DESC LIMIT 1"
+      ).bind(taskId).first();
+      if (!executionApproval) {
+        return json({
+          ok: false,
+          error: "A current, unused manager approval is required before any AI task can execute. Approve a task_execution request for this exact task."
+        }, 403);
       }
 
       if (!env.AI || typeof env.AI.run !== "function") {

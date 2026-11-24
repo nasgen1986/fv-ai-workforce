@@ -4,10 +4,15 @@ import worker from "../src/index.js";
 
 const TOKEN = "test-token-that-is-at-least-32-characters-long";
 
-async function call(path, { method = "GET", token, env = {} } = {}) {
+async function call(path, { method = "GET", token, env = {}, body } = {}) {
   const headers = new Headers();
   if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
-  const request = new Request(`https://example.test${path}`, { method, headers });
+  if (body !== undefined) headers.set("content-type", "application/json");
+  const request = new Request(`https://example.test${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
   return worker.fetch(request, env);
 }
 

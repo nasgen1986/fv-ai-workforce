@@ -588,7 +588,7 @@ async function handleApi(request, env, url) {
         }
         if (assigned.requires_approval === 1) {
           const approval = await env.DB.prepare(
-            "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' ORDER BY decided_at DESC LIMIT 1"
+            "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' AND consumed_at IS NOT NULL ORDER BY decided_at DESC LIMIT 1"
           ).bind(taskId).first();
           if (!approval) {
             return json({

@@ -279,7 +279,8 @@ async function handleApi(request, env, url) {
           if (worker.status !== "active") return json({ ok: false, error: "Worker must be active before assignment." }, 409);
         }
 
-        const completedAt = ["completed", "failed", "cancelled"].includes(nextStatus)
+        // completed_at records successful completion only, not failure or cancellation.
+        const completedAt = nextStatus === "completed"
           ? (current.completed_at || new Date().toISOString())
           : null;
 
@@ -504,7 +505,7 @@ async function handleApi(request, env, url) {
         });
       } catch {
         await env.DB.prepare(
-          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'in_progress'"
+          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ? AND status = 'in_progress'"
         ).bind(taskId).run();
         await recordEvent(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
           reason: "AI inference request failed",
@@ -640,6 +641,9 @@ async function handleApi(request, env, url) {
       if (!current) return json({ ok: false, error: "Submission not found." }, 404);
       if (current.status !== "submitted") {
         return json({ ok: false, error: "This submission has already been reviewed." }, 409);
+      }
+      if (current.task_status !== "in_progress") {
+        return json({ ok: false, error: "Only submissions for an in-progress task can be reviewed." }, 409);
       }
       const update = await env.DB.prepare(
         "UPDATE task_submissions SET status = ?, reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), review_note = ? WHERE id = ? AND status = 'submitted'"

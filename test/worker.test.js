@@ -146,16 +146,16 @@ test("dispatcher assignment atomically rechecks that the selected worker is stil
   const db = {
     prepare(sql) {
       return {
+        all: async () => {
+          if (sql.includes("FROM workers WHERE status = 'active'")) return { results: [workerRow] };
+          throw new Error("Unexpected list query in dispatcher active-worker test: " + sql);
+        },
         bind(...values) {
           return {
             sql, values,
             first: async () => {
               if (sql.includes("SELECT id, title, status, assigned_worker_id FROM tasks")) return task;
               throw new Error("Unexpected query in dispatcher active-worker test: " + sql);
-            },
-            all: async () => {
-              if (sql.includes("FROM workers WHERE status = 'active'")) return { results: [workerRow] };
-              throw new Error("Unexpected list query in dispatcher active-worker test: " + sql);
             }
           };
         }

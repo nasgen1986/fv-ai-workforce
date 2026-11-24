@@ -352,7 +352,6 @@ async function handleApi(request, env, url) {
         const updated = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first();
         return json({ ok: true, task: updated });
       }
-      }
     }
 
 

@@ -10,21 +10,23 @@ The current branch contains a protected task-coordination API with:
 - Approval requests with single-use `task_execution` approvals.
 - Human review of work submissions before a task can be marked completed.
 - Task-event audit records for key workflow changes.
-- Request-body size limits and bearer-token authentication.
+- Request-body size limits, manager authentication, and scoped per-worker credentials.
 
 This is **not yet connected** to the FlipTop Vault website, Firebase/Firestore, Facebook, Shopee, or external social accounts. It does not run scheduled monitoring jobs or publish content.
 
 ## Important security boundaries
 
 - `WORKFORCE_API_TOKEN` is a manager/control-plane secret. Treat it as an administrator credential; do not give it to an AI worker, browser client, or public website.
-- Worker records and role labels are not a substitute for individual worker authentication. Before external workers are allowed to call this API, add per-worker identity and scoped permissions.
+- Each worker receives a separate random bearer token. Only its SHA-256 hash is stored in D1; the plaintext token is returned once by the manager-only credential issuance route.
+- Worker tokens can only read that worker's assigned task summaries and submit work for that worker. They cannot list other workers' tasks, create or assign tasks, manage approvals, review submissions, or trigger AI execution.
+- Managers can rotate a worker token with `POST /api/workers/:id/credentials` and revoke active tokens with `DELETE /api/workers/:id/credentials`. Only active workers can receive credentials.
 - AI execution is disabled unless `AI_EXECUTION_ENABLED` is explicitly set to `true`. The test Wrangler configuration intentionally has no Workers AI binding.
 - Every AI task run requires a currently approved, unused `task_execution` approval for that exact task.
 - Task completion can only happen through accepting a submitted work item.
 - Human approval is still required before public posts, live website changes, database writes, or other external actions.
 - The current automated API tests use mocked D1 interfaces. The SQLite compatibility tests exercise the migration SQL and transaction logic, but they are not a substitute for integration tests against the actual Cloudflare D1 service.
 
-**Do not treat this branch as production-ready.** Production readiness still requires per-worker authentication/authorization, actual isolated TEST D1 integration tests, operational monitoring/rate limiting, and a reviewed deployment procedure.
+**Do not treat this branch as production-ready.** Production readiness still requires actual isolated TEST D1 integration tests, operational monitoring/rate limiting, and a reviewed deployment procedure.
 
 ## Test-only Cloudflare configuration
 
@@ -61,7 +63,7 @@ Use Cloudflare's free tier where practical. Check current plan limits before dep
 
 1. Finish workflow and security hardening on the feature branch.
 2. Verify migrations and task/approval behavior against the isolated TEST D1 database.
-3. Add scoped manager and per-worker authentication.
+3. Finish testing scoped manager and per-worker authentication.
 4. Add a simple manager dashboard and worker task protocol.
 5. Add read-only FlipTop Vault monitoring and content preparation.
 6. Add human-approved social publishing and merch updates only after separate permission and integration reviews.

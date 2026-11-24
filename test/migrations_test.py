@@ -103,6 +103,153 @@ class MigrationAndTransactionTests(unittest.TestCase):
             1,
         )
 
+    def test_execution_claim_and_approval_consumption_are_one_transaction(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status, capabilities_json) "
+            "VALUES ('worker-1', 'Worker', 'research', 'active', '[\\"read_only_research\\"]')"
+        )
+        self.seed_task(status="assigned")
+        self.db.execute(
+            "UPDATE tasks SET assigned_worker_id='worker-1' WHERE id='task-1'"
+        )
+        self.db.execute(
+            "INSERT INTO approval_requests (id, task_id, action_type, summary, status) "
+            "VALUES ('approval-1', 'task-1', 'task_execution', 'Run task', 'approved')"
+        )
+
+        self.db.execute("BEGIN")
+        self.db.execute(
+            "UPDATE tasks SET status='in_progress' WHERE id='task-1' "
+            "AND status='assigned' AND assigned_worker_id='worker-1' "
+            "AND EXISTS (SELECT 1 FROM approval_requests WHERE id='approval-1' "
+            "AND status='approved' AND consumed_at IS NULL)"
+        )
+        self.assertEqual(self.db.execute("SELECT changes()").fetchone()[0], 1)
+        self.db.execute(
+            "UPDATE approval_requests SET consumed_at='now' WHERE id='approval-1' "
+            "AND status='approved' AND consumed_at IS NULL AND changes()=1"
+        )
+        self.assertEqual(self.db.execute("SELECT changes()").fetchone()[0], 1)
+        self.db.execute(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) "
+            "SELECT 'task-1', 'system', 'approval_gate', 'execution_approval_consumed', '{}' "
+            "WHERE changes()=1"
+        )
+        self.db.execute("COMMIT")
+
+        self.assertEqual(
+            self.db.execute("SELECT status FROM tasks WHERE id='task-1'").fetchone()[0],
+            "in_progress",
+        )
+        self.assertIsNotNone(
+            self.db.execute("SELECT consumed_at FROM approval_requests WHERE id='approval-1'").fetchone()[0]
+        )
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='execution_approval_consumed'").fetchone()[0],
+            1,
+        )
+
+    def test_second_execution_claim_cannot_reuse_consumed_approval(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status) VALUES ('worker-1', 'Worker', 'research', 'active')"
+        )
+        self.seed_task(status="assigned")
+        self.db.execute("UPDATE tasks SET assigned_worker_id='worker-1' WHERE id='task-1'")
+        self.db.execute(
+            "INSERT INTO approval_requests (id, task_id, action_type, summary, status, consumed_at) "
+            "VALUES ('approval-1', 'task-1', 'task_execution', 'Run task', 'approved', 'already-used')"
+        )
+
+        self.db.execute("BEGIN")
+        self.db.execute(
+            "UPDATE tasks SET status='in_progress' WHERE id='task-1' AND status='assigned' "
+            "AND assigned_worker_id='worker-1' AND EXISTS (SELECT 1 FROM approval_requests "
+            "WHERE id='approval-1' AND status='approved' AND consumed_at IS NULL)"
+        )
+        changed = self.db.execute("SELECT changes()").fetchone()[0]
+        self.db.execute("ROLLBACK")
+        self.assertEqual(changed, 0)
+        self.assertEqual(
+            self.db.execute("SELECT status FROM tasks WHERE id='task-1'").fetchone()[0],
+            "assigned",
+        )
+
+    def test_dispatcher_assignment_is_idempotent_under_duplicate_requests(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status, capabilities_json) "
+            "VALUES ('worker-1', 'Worker', 'research', 'active', '[\\"read_only_research\\"]')"
+        )
+        self.seed_task(status="pending")
+
+        outcomes = []
+        for _ in range(2):
+            self.db.execute("BEGIN")
+            self.db.execute(
+                "UPDATE tasks SET status='assigned', assigned_worker_id='worker-1' "
+                "WHERE id='task-1' AND status='pending' AND assigned_worker_id IS NULL"
+            )
+            outcomes.append(self.db.execute("SELECT changes()").fetchone()[0])
+            self.db.execute(
+                "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) "
+                "SELECT 'task-1', 'system', 'dispatcher', 'dispatcher_assigned', '{}' WHERE changes()=1"
+            )
+            self.db.execute("COMMIT")
+
+        self.assertEqual(outcomes, [1, 0])
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='dispatcher_assigned'").fetchone()[0],
+            1,
+        )
+
+    def test_duplicate_submission_review_only_completes_once(self):
+        self.seed_task(status="in_progress")
+        self.db.execute(
+            "INSERT INTO workers (id, name, role) VALUES ('worker-1', 'Worker', 'research')"
+        )
+        self.db.execute(
+            "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) "
+            "VALUES ('submission-1', 'task-1', 'worker-1', 'Summary', 'Content')"
+        )
+
+        outcomes = []
+        for _ in range(2):
+            self.db.execute("BEGIN")
+            self.db.execute(
+                "UPDATE task_submissions SET status='accepted', reviewed_at='now' "
+                "WHERE id='submission-1' AND status='submitted' "
+                "AND EXISTS (SELECT 1 FROM tasks WHERE id='task-1' AND status='in_progress')"
+            )
+            outcomes.append(self.db.execute("SELECT changes()").fetchone()[0])
+            self.db.execute(
+                "UPDATE tasks SET status='completed', completed_at='now' "
+                "WHERE id='task-1' AND status='in_progress' AND changes()=1"
+            )
+            self.db.execute(
+                "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) "
+                "SELECT 'task-1', 'manager', 'manager', 'submission_reviewed', '{}' WHERE changes()=1"
+            )
+            self.db.execute("COMMIT")
+
+        self.assertEqual(outcomes, [1, 0])
+        self.assertEqual(
+            self.db.execute("SELECT status FROM tasks WHERE id='task-1'").fetchone()[0],
+            "completed",
+        )
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='submission_reviewed'").fetchone()[0],
+            1,
+        )
+
+    def test_database_rejects_invalid_statuses_and_orphaned_submissions(self):
+        self.seed_task(status="pending")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("UPDATE tasks SET status='superuser' WHERE id='task-1'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) "
+                "VALUES ('orphan', 'task-1', 'missing-worker', 'Summary', 'Content')"
+            )
+
     def test_audit_failure_rolls_back_the_entire_submission_review(self):
         self.seed_task()
         self.db.execute(

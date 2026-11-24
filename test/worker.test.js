@@ -33,6 +33,65 @@ test("GET /health/db reports an unbound database safely", async () => {
   assert.equal(body.database, "unbound");
 });
 
+test("GET /health/db detects a missing single-use approval migration column", async () => {
+  const tables = [
+    "approval_requests",
+    "task_events",
+    "task_submissions",
+    "tasks",
+    "workers"
+  ];
+  const db = {
+    prepare(sql) {
+      return {
+        all: async () => {
+          if (sql.includes("sqlite_master")) return { results: tables.map((name) => ({ name })) };
+          if (sql.includes("pragma_table_info")) {
+            return { results: [{ name: "id" }, { name: "task_id" }, { name: "status" }] };
+          }
+          throw new Error("Unexpected health-check query: " + sql);
+        }
+      };
+    }
+  };
+  const response = await call("/health/db", { env: { DB: db } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.database, "connected");
+  assert.equal(body.schemaReady, false);
+  assert.deepEqual(body.missingTables, []);
+  assert.deepEqual(body.missingColumns, ["consumed_at"]);
+});
+
+test("GET /health/db reports ready only when required tables and consumed_at exist", async () => {
+  const tables = [
+    "approval_requests",
+    "task_events",
+    "task_submissions",
+    "tasks",
+    "workers"
+  ];
+  const db = {
+    prepare(sql) {
+      return {
+        all: async () => {
+          if (sql.includes("sqlite_master")) return { results: tables.map((name) => ({ name })) };
+          if (sql.includes("pragma_table_info")) {
+            return { results: [{ name: "id" }, { name: "task_id" }, { name: "status" }, { name: "consumed_at" }] };
+          }
+          throw new Error("Unexpected health-check query: " + sql);
+        }
+      };
+    }
+  };
+  const response = await call("/health/db", { env: { DB: db } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.schemaReady, true);
+  assert.deepEqual(body.missingTables, []);
+  assert.deepEqual(body.missingColumns, []);
+});
+
 test("protected API returns 503 when API token is not configured", async () => {
   const response = await call("/api/tasks");
   assert.equal(response.status, 503);

@@ -958,9 +958,24 @@ export default {
         const approvalColumns = await env.DB.prepare(
           "SELECT name FROM pragma_table_info('approval_requests')"
         ).all();
-        const columnNames = (approvalColumns.results || []).map((row) => row.name);
-        const requiredApprovalColumns = ["consumed_at"];
-        const missingColumns = requiredApprovalColumns.filter((name) => !columnNames.includes(name));
+        const approvalColumnNames = (approvalColumns.results || []).map((row) => row.name);
+        const credentialColumns = await env.DB.prepare(
+          "SELECT name FROM pragma_table_info('worker_credentials')"
+        ).all();
+        const credentialColumnNames = (credentialColumns.results || []).map((row) => row.name);
+        const requiredColumns = [
+          ["approval_requests", "consumed_at"],
+          ["worker_credentials", "worker_id"],
+          ["worker_credentials", "token_hash"],
+          ["worker_credentials", "status"],
+          ["worker_credentials", "revoked_at"]
+        ];
+        const missingColumns = requiredColumns
+          .filter(([table, column]) => {
+            const names = table === "approval_requests" ? approvalColumnNames : credentialColumnNames;
+            return !names.includes(column);
+          })
+          .map(([table, column]) => `${table}.${column}`);
         const schemaReady = missingTables.length === 0 && missingColumns.length === 0;
 
         return json({

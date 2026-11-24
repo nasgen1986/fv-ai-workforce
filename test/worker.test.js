@@ -250,3 +250,42 @@ test("submission review uses one atomic D1 batch for submission, task, and audit
   const body = await response.json();
   assert.equal(body.task.status, "completed");
 });
+
+
+test("API rejects oversized request bodies before parsing", async () => {
+  const headers = new Headers({
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json"
+  });
+  const request = new Request("https://example.test/api/tasks", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ title: "Too large", description: "x".repeat(110000) })
+  });
+  const response = await worker.fetch(request, {
+    WORKFORCE_API_TOKEN: TOKEN,
+    DB: {}
+  });
+  assert.equal(response.status, 413);
+  assert.match((await response.json()).error, /too large/i);
+});
+
+test("API reports malformed JSON without leaking parser details", async () => {
+  const request = new Request("https://example.test/api/tasks", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json"
+    },
+    body: "{not-json"
+  });
+  const response = await worker.fetch(request, {
+    WORKFORCE_API_TOKEN: TOKEN,
+    DB: {}
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "Request body must be valid JSON."
+  });
+});

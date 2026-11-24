@@ -3,5 +3,14 @@
   "name": "fv-ai-workforce",
   "main": "src/index.js",
   "compatibility_date": "2026-11-24",
-  "workers_dev": true
+  "workers_dev": true,
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fv-ai-workforce-db",
+      "database_id": "ddbe3c90-4a49-41f0-a172-03d9802b8802",
+      "migrations_dir": "migrations"
+    }
+  ]
 }

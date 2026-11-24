@@ -64,10 +64,12 @@ test("GET /health/db detects a missing single-use approval migration column", as
   assert.equal(body.database, "connected");
   assert.equal(body.schemaReady, false);
   assert.deepEqual(body.missingTables, []);
-  assert.deepEqual(body.missingColumns, ["consumed_at"]);
+  assert.deepEqual(body.missingColumns, [
+    "approval_requests.consumed_at"
+  ]);
 });
 
-test("GET /health/db reports ready only when required tables and consumed_at exist", async () => {
+test("GET /health/db reports ready only when required tables and security columns exist", async () => {
   const tables = [
     "approval_requests",
     "task_events",

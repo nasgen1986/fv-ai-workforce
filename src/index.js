@@ -416,9 +416,6 @@ async function handleApi(request, env, url) {
       const taskId = parts[2];
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first();
       if (!task) return json({ ok: false, error: "Task not found." }, 404);
-      if (task.assigned_worker_id !== "fv-research-agent") {
-        return json({ ok: false, error: "AI execution is currently limited to the FV Research Agent." }, 403);
-      }
       if (task.status !== "assigned") {
         return json({ ok: false, error: "Only assigned tasks can be run. This prevents accidental duplicate AI runs." }, 409);
       }
@@ -443,7 +440,7 @@ async function handleApi(request, env, url) {
         "SELECT id, name, role, status, capabilities_json FROM workers WHERE id = ?"
       ).bind(task.assigned_worker_id).first();
       if (!worker || worker.status !== "active") {
-        return json({ ok: false, error: "FV Research Agent must be active before running a task." }, 409);
+        return json({ ok: false, error: "The assigned worker must be active before running a task." }, 409);
       }
 
       let capabilities = [];

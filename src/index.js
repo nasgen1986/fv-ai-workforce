@@ -568,8 +568,8 @@ async function handleApi(request, env, url) {
       try {
         executionStarted = await env.DB.batch([
           env.DB.prepare(
-            "UPDATE tasks SET status = 'in_progress', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'assigned' AND assigned_worker_id = ? AND EXISTS (SELECT 1 FROM approval_requests WHERE id = ? AND status = 'approved' AND consumed_at IS NULL)"
-          ).bind(taskId, worker.id, executionApproval.id),
+            "UPDATE tasks SET status = 'in_progress', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'assigned' AND assigned_worker_id = ? AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM approval_requests WHERE id = ? AND status = 'approved' AND consumed_at IS NULL)"
+          ).bind(taskId, worker.id, worker.id, executionApproval.id),
           env.DB.prepare(
             "UPDATE approval_requests SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'approved' AND consumed_at IS NULL AND changes() = 1"
           ).bind(executionApproval.id),

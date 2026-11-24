@@ -39,6 +39,7 @@ test("GET /health/db detects a missing single-use approval migration column", as
     "task_events",
     "task_submissions",
     "tasks",
+    "worker_credentials",
     "workers"
   ];
   const db = {
@@ -69,6 +70,7 @@ test("GET /health/db reports ready only when required tables and consumed_at exi
     "task_events",
     "task_submissions",
     "tasks",
+    "worker_credentials",
     "workers"
   ];
   const db = {
@@ -131,6 +133,182 @@ test("all worker, task, approval, dispatcher, and review API routes require mana
     const response = await call(path, { method, env });
     assert.equal(response.status, 401, `${method} ${path} must reject requests without manager authentication`);
   }
+});
+
+async function sha256HexForTest(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+test("worker credentials are hashed, scoped to one worker, and cannot access manager routes", async () => {
+  const workerToken = "worker-token-test-which-is-43-characters-long";
+  const expectedHash = await sha256HexForTest(workerToken);
+  const db = {
+    prepare(sql) {
+      return {
+        bind(value) {
+          return {
+            first: async () => {
+              assert.match(sql, /worker_credentials/);
+              assert.equal(value, expectedHash);
+              return { worker_id: "worker-1" };
+            }
+          };
+        }
+      };
+    }
+  };
+  const env = { WORKFORCE_API_TOKEN: TOKEN, DB: db };
+  const managerRoute = await call("/api/tasks", { token: workerToken, env });
+  assert.equal(managerRoute.status, 403);
+
+  const otherWorker = await call("/api/workers/worker-2/tasks", {
+    token: workerToken,
+    env
+  });
+  assert.equal(otherWorker.status, 403);
+});
+
+test("worker credentials can read only their own assigned task summaries", async () => {
+  const workerToken = "worker-token-test-which-is-43-characters-long";
+  const expectedHash = await sha256HexForTest(workerToken);
+  const db = {
+    prepare(sql) {
+      return {
+        bind(value) {
+          return {
+            first: async () => {
+              if (sql.includes("worker_credentials")) {
+                assert.equal(value, expectedHash);
+                return { worker_id: "worker-1" };
+              }
+              if (sql === "SELECT id FROM workers WHERE id = ?") return { id: value };
+              throw new Error("Unexpected query: " + sql);
+            },
+            all: async () => {
+              assert.match(sql, /SELECT id, title, description, status, priority/);
+              assert.equal(value, "worker-1");
+              return { results: [{ id: "task-1", title: "Research", status: "assigned" }] };
+            }
+          };
+        }
+      };
+    }
+  };
+  const response = await call("/api/workers/worker-1/tasks", {
+    token: workerToken,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db }
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).tasks[0].id, "task-1");
+});
+
+test("worker submissions derive identity from the credential, not request body", async () => {
+  const workerToken = "worker-token-test-which-is-43-characters-long";
+  const expectedHash = await sha256HexForTest(workerToken);
+  let batchStatements;
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          return {
+            first: async () => {
+              if (sql.includes("worker_credentials")) {
+                assert.equal(values[0], expectedHash);
+                return { worker_id: "worker-1" };
+              }
+              if (sql.includes("SELECT id, status, requires_approval FROM tasks")) {
+                return { id: "task-1", status: "in_progress", requires_approval: 0 };
+              }
+              if (sql.includes("SELECT t.*, w.status AS worker_status")) {
+                return { id: "task-1", status: "in_progress", assigned_worker_id: "worker-1", worker_status: "active", requires_approval: 0 };
+              }
+              if (sql.includes("SELECT * FROM task_submissions WHERE id = ?")) {
+                return { id: "submission-1", worker_id: "worker-1" };
+              }
+              throw new Error("Unexpected query: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      batchStatements = statements;
+      return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+    }
+  };
+  const response = await call("/api/tasks/task-1/submissions", {
+    method: "POST",
+    token: workerToken,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { summary: "Finished", content: "Worker output" }
+  });
+  assert.equal(response.status, 201);
+  assert.equal(batchStatements[0].values[2], "worker-1");
+  assert.equal(batchStatements[1].values[1], "worker-1");
+});
+
+test("worker credentials cannot impersonate another worker in a submission", async () => {
+  const workerToken = "worker-token-test-which-is-43-characters-long";
+  const expectedHash = await sha256HexForTest(workerToken);
+  const db = {
+    prepare(sql) {
+      return {
+        bind(value) {
+          return {
+            first: async () => {
+              assert.match(sql, /worker_credentials/);
+              assert.equal(value, expectedHash);
+              return { worker_id: "worker-1" };
+            }
+          };
+        }
+      };
+    }
+  };
+  const response = await call("/api/tasks/task-1/submissions", {
+    method: "POST",
+    token: workerToken,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { worker_id: "worker-2", summary: "Impersonation", content: "Must be rejected" }
+  });
+  assert.equal(response.status, 403);
+});
+
+test("manager can issue one-time worker tokens without storing plaintext", async () => {
+  let insertedValues;
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          return {
+            first: async () => ({ id: "worker-1", status: "active" }),
+            sql,
+            values,
+            run: async () => ({ meta: { changes: 1 } })
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      insertedValues = statements[1].values;
+      assert.match(statements[0].sql, /UPDATE worker_credentials/);
+      assert.match(statements[1].sql, /INSERT INTO worker_credentials/);
+      return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+    }
+  };
+  const response = await call("/api/workers/worker-1/credentials", {
+    method: "POST",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db }
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.token.length, 43);
+  assert.equal(insertedValues[1], "worker-1");
+  assert.match(insertedValues[2], /^[a-f0-9]{64}$/);
+  assert.notEqual(insertedValues[2], body.token);
+  assert.equal(insertedValues.includes(body.token), false);
 });
 
 test("AI task execution stays disabled unless explicitly enabled", async () => {

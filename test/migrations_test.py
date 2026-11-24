@@ -106,7 +106,7 @@ class MigrationAndTransactionTests(unittest.TestCase):
     def test_execution_claim_and_approval_consumption_are_one_transaction(self):
         self.db.execute(
             "INSERT INTO workers (id, name, role, status, capabilities_json) "
-            "VALUES ('worker-1', 'Worker', 'research', 'active', '[\\"read_only_research\\"]')"
+            "VALUES ('worker-1', 'Worker', 'research', 'active', '[]')"
         )
         self.seed_task(status="assigned")
         self.db.execute(
@@ -177,7 +177,7 @@ class MigrationAndTransactionTests(unittest.TestCase):
     def test_dispatcher_assignment_is_idempotent_under_duplicate_requests(self):
         self.db.execute(
             "INSERT INTO workers (id, name, role, status, capabilities_json) "
-            "VALUES ('worker-1', 'Worker', 'research', 'active', '[\\"read_only_research\\"]')"
+            "VALUES ('worker-1', 'Worker', 'research', 'active', '[]')"
         )
         self.seed_task(status="pending")
 

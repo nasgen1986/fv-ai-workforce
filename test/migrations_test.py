@@ -121,6 +121,7 @@ class MigrationAndTransactionTests(unittest.TestCase):
         self.db.execute(
             "UPDATE tasks SET status='in_progress' WHERE id='task-1' "
             "AND status='assigned' AND assigned_worker_id='worker-1' "
+            "AND EXISTS (SELECT 1 FROM workers WHERE id='worker-1' AND status='active') "
             "AND EXISTS (SELECT 1 FROM approval_requests WHERE id='approval-1' "
             "AND status='approved' AND consumed_at IS NULL)"
         )
@@ -147,6 +148,47 @@ class MigrationAndTransactionTests(unittest.TestCase):
         self.assertEqual(
             self.db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='execution_approval_consumed'").fetchone()[0],
             1,
+        )
+
+    def test_ai_execution_claim_rejects_worker_paused_after_precheck(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status) "
+            "VALUES ('worker-1', 'Worker', 'research', 'active')"
+        )
+        self.seed_task(status="assigned")
+        self.db.execute(
+            "UPDATE tasks SET assigned_worker_id='worker-1' WHERE id='task-1'"
+        )
+        self.db.execute(
+            "INSERT INTO approval_requests (id, task_id, action_type, summary, status) "
+            "VALUES ('approval-1', 'task-1', 'task_execution', 'Run task', 'approved')"
+        )
+
+        # Simulate a pause after the application pre-check but before atomic claim.
+        self.db.execute("UPDATE workers SET status='paused' WHERE id='worker-1'")
+
+        self.db.execute("BEGIN")
+        self.db.execute(
+            "UPDATE tasks SET status='in_progress' WHERE id='task-1' "
+            "AND status='assigned' AND assigned_worker_id='worker-1' "
+            "AND EXISTS (SELECT 1 FROM workers WHERE id='worker-1' AND status='active') "
+            "AND EXISTS (SELECT 1 FROM approval_requests WHERE id='approval-1' "
+            "AND status='approved' AND consumed_at IS NULL)"
+        )
+        changed = self.db.execute("SELECT changes()").fetchone()[0]
+        self.db.execute("ROLLBACK")
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(
+            self.db.execute("SELECT status FROM tasks WHERE id='task-1'").fetchone()[0],
+            "assigned",
+        )
+        self.assertIsNone(
+            self.db.execute("SELECT consumed_at FROM approval_requests WHERE id='approval-1'").fetchone()[0]
+        )
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='execution_approval_consumed'").fetchone()[0],
+            0,
         )
 
     def test_second_execution_claim_cannot_reuse_consumed_approval(self):

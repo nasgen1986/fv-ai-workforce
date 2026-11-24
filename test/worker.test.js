@@ -452,9 +452,10 @@ test("AI execution claim and approval consumption are atomic before inference", 
   const db = {
     prepare(sql) {
       return {
-        bind() {
+        bind(...values) {
           return {
             sql,
+            values,
             first: async () => {
               if (sql === "SELECT * FROM tasks WHERE id = ?") return task;
               if (sql.includes("SELECT id FROM approval_requests")) return approval;
@@ -469,7 +470,9 @@ test("AI execution claim and approval consumption are atomic before inference", 
       batches.push(statements);
       if (batches.length === 1) {
         assert.equal(statements.length, 4);
+        assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
         assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM approval_requests/);
+        assert.deepEqual(statements[0].values, ["task-1", "worker-1", "worker-1", "approval-1"]);
         assert.match(statements[1].sql, /changes\(\) = 1/);
         assert.match(statements[2].sql, /changes\(\) = 1/);
         return [

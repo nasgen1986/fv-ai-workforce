@@ -938,11 +938,11 @@ export default {
 
       try {
         const result = await env.DB.prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('workers', 'tasks', 'task_events', 'approval_requests', 'task_submissions') ORDER BY name"
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('workers', 'tasks', 'task_events', 'approval_requests', 'task_submissions', 'worker_credentials') ORDER BY name"
         ).all();
 
         const tables = (result.results || []).map((row) => row.name);
-        const expectedTables = ["approval_requests", "task_events", "task_submissions", "tasks", "workers"];
+        const expectedTables = ["approval_requests", "task_events", "task_submissions", "tasks", "worker_credentials", "workers"];
         const missingTables = expectedTables.filter((name) => !tables.includes(name));
 
         // Migration 0003 adds consumed_at. Check it explicitly so an older

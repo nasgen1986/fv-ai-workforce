@@ -212,6 +212,8 @@ test("worker submissions derive identity from the credential, not request body",
       return {
         bind(...values) {
           return {
+            sql,
+            values,
             first: async () => {
               if (sql.includes("worker_credentials")) {
                 assert.equal(values[0], expectedHash);
@@ -257,9 +259,14 @@ test("worker credentials cannot impersonate another worker in a submission", asy
         bind(value) {
           return {
             first: async () => {
-              assert.match(sql, /worker_credentials/);
-              assert.equal(value, expectedHash);
-              return { worker_id: "worker-1" };
+              if (sql.includes("worker_credentials")) {
+                assert.equal(value, expectedHash);
+                return { worker_id: "worker-1" };
+              }
+              if (sql.includes("SELECT id, status, requires_approval FROM tasks")) {
+                return { id: "task-1", status: "in_progress", requires_approval: 0 };
+              }
+              throw new Error("Unexpected query in impersonation test: " + sql);
             }
           };
         }

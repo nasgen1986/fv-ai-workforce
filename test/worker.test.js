@@ -71,3 +71,40 @@ test("direct AI test endpoint remains disabled", async () => {
   assert.equal(body.ok, false);
   assert.match(body.error, /Direct AI tests are disabled/);
 });
+
+test("task PATCH cannot mark a task completed without accepting a submission", async () => {
+  const currentTask = {
+    id: "task-1",
+    status: "in_progress",
+    priority: "normal",
+    assigned_worker_id: null,
+    completed_at: null
+  };
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            first: async () => {
+              if (sql === "SELECT * FROM tasks WHERE id = ?") return currentTask;
+              throw new Error("Unexpected database query in completion guard test.");
+            },
+            run: async () => {
+              throw new Error("Task update must not run when completion bypass is rejected.");
+            }
+          };
+        }
+      };
+    }
+  };
+  const env = { WORKFORCE_API_TOKEN: TOKEN, DB: db };
+  const response = await call("/api/tasks/task-1", {
+    method: "PATCH",
+    token: TOKEN,
+    env,
+    body: { status: "completed" }
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.match(body.error, /only be completed by accepting a submitted work item/i);
+});

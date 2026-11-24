@@ -289,3 +289,115 @@ test("API reports malformed JSON without leaking parser details", async () => {
     error: "Request body must be valid JSON."
   });
 });
+
+
+test("AI execution cannot start without an unused task-specific approval", async () => {
+  const task = {
+    id: "task-1",
+    title: "Research",
+    description: "Read-only research",
+    status: "assigned",
+    assigned_worker_id: "worker-1"
+  };
+  let aiCalled = false;
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            first: async () => {
+              if (sql === "SELECT * FROM tasks WHERE id = ?") return task;
+              if (sql.includes("SELECT id FROM approval_requests")) return null;
+              throw new Error("Unexpected query in missing-approval test: " + sql);
+            }
+          };
+        }
+      };
+    }
+  };
+  const response = await call("/api/tasks/task-1/run", {
+    method: "POST",
+    token: TOKEN,
+    env: {
+      WORKFORCE_API_TOKEN: TOKEN,
+      AI_EXECUTION_ENABLED: "true",
+      DB: db,
+      AI: { run: async () => { aiCalled = true; throw new Error("Must not run"); } }
+    }
+  });
+  assert.equal(response.status, 403);
+  assert.equal(aiCalled, false);
+});
+
+test("AI execution claim and approval consumption are atomic before inference", async () => {
+  const task = {
+    id: "task-1",
+    title: "Research",
+    description: "Read-only research",
+    status: "assigned",
+    assigned_worker_id: "worker-1"
+  };
+  const approval = { id: "approval-1" };
+  const workerRow = {
+    id: "worker-1",
+    name: "Research worker",
+    role: "research",
+    status: "active",
+    capabilities_json: '["read_only_research"]'
+  };
+  const batches = [];
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            first: async () => {
+              if (sql === "SELECT * FROM tasks WHERE id = ?") return task;
+              if (sql.includes("SELECT id FROM approval_requests")) return approval;
+              if (sql.includes("SELECT id, name, role, status, capabilities_json FROM workers")) return workerRow;
+              throw new Error("Unexpected query in atomic execution test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      batches.push(statements);
+      if (batches.length === 1) {
+        assert.equal(statements.length, 4);
+        assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM approval_requests/);
+        assert.match(statements[1].sql, /changes\(\) = 1/);
+        assert.match(statements[2].sql, /changes\(\) = 1/);
+        return [
+          { meta: { changes: 1 } },
+          { meta: { changes: 1 } },
+          { meta: { changes: 1 } },
+          { meta: { changes: 1 } }
+        ];
+      }
+      assert.equal(statements.length, 2);
+      assert.match(statements[0].sql, /status = 'failed'/);
+      assert.match(statements[1].sql, /changes\(\) = 1/);
+      return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+    }
+  };
+  let aiCalled = false;
+  const response = await call("/api/tasks/task-1/run", {
+    method: "POST",
+    token: TOKEN,
+    env: {
+      WORKFORCE_API_TOKEN: TOKEN,
+      AI_EXECUTION_ENABLED: "true",
+      DB: db,
+      AI: {
+        run: async () => {
+          aiCalled = true;
+          throw new Error("Test stub: stop before any AI inference");
+        }
+      }
+    }
+  });
+  assert.equal(response.status, 502);
+  assert.equal(aiCalled, true);
+  assert.equal(batches.length, 2);
+});

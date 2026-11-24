@@ -90,6 +90,7 @@ test("task PATCH cannot mark a task completed without accepting a submission", a
       return {
         bind() {
           return {
+            sql,
             first: async () => {
               if (sql === "SELECT * FROM tasks WHERE id = ?") return currentTask;
               throw new Error("Unexpected database query in completion guard test.");
@@ -129,6 +130,7 @@ test("generic task PATCH rejects workflow-bypassing status transitions", async (
       return {
         bind() {
           return {
+            sql,
             first: async () => {
               if (sql === "SELECT * FROM tasks WHERE id = ?") return currentTask;
               throw new Error("Unexpected query in transition guard test.");
@@ -166,6 +168,7 @@ test("failed task can only be reset to assigned with an active assigned worker",
       return {
         bind() {
           return {
+            sql,
             first: async () => {
               if (sql === "SELECT * FROM tasks WHERE id = ?") return currentTask;
               if (sql === "SELECT id, status FROM workers WHERE id = ?") {
@@ -208,6 +211,7 @@ test("submission review uses one atomic D1 batch for submission, task, and audit
       return {
         bind() {
           return {
+            sql,
             first: async () => {
               if (sql.includes("SELECT s.*, t.requires_approval")) return submission;
               if (sql === "SELECT * FROM task_submissions WHERE id = ?") {

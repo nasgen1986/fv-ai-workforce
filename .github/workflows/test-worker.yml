@@ -24,5 +24,7 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm install
+      - name: Run isolated API safety tests (no deployment or AI inference)
+        run: npm test
       - name: Validate test Worker bundle (dry run only)
         run: npm run check

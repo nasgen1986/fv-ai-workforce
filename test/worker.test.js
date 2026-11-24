@@ -186,6 +186,34 @@ test("worker credentials are hashed, scoped to one worker, and cannot access man
   }
 });
 
+test("revoked worker credentials are rejected before any worker route runs", async () => {
+  const workerToken = "worker-token-test-which-is-43-characters-long";
+  const expectedHash = await sha256HexForTest(workerToken);
+  let lookupSql = "";
+  const db = {
+    prepare(sql) {
+      return {
+        bind(value) {
+          return {
+            first: async () => {
+              lookupSql = sql;
+              assert.equal(value, expectedHash);
+              return null;
+            }
+          };
+        }
+      };
+    }
+  };
+  const response = await call("/api/workers/worker-1/tasks", {
+    token: workerToken,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db }
+  });
+  assert.equal(response.status, 401);
+  assert.match(lookupSql, /wc.status = 'active'/);
+  assert.match(lookupSql, /w.status = 'active'/);
+});
+
 test("worker credentials can read only their own assigned task summaries", async () => {
   const workerToken = "worker-token-test-which-is-43-characters-long";
   const expectedHash = await sha256HexForTest(workerToken);

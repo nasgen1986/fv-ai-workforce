@@ -110,6 +110,29 @@ test("protected API rejects a missing or incorrect bearer token", async () => {
   assert.equal(incorrect.status, 401);
 });
 
+test("all worker, task, approval, dispatcher, and review API routes require manager authentication", async () => {
+  const env = { WORKFORCE_API_TOKEN: TOKEN, DB: {} };
+  const protectedRoutes = [
+    ["/api/workers", "GET"],
+    ["/api/workers/worker-1", "PATCH"],
+    ["/api/workers/worker-1/tasks", "GET"],
+    ["/api/tasks", "GET"],
+    ["/api/tasks/task-1", "GET"],
+    ["/api/tasks/task-1", "PATCH"],
+    ["/api/tasks/task-1/run", "POST"],
+    ["/api/tasks/task-1/submissions", "POST"],
+    ["/api/approvals", "GET"],
+    ["/api/approvals/approval-1", "PATCH"],
+    ["/api/submissions/submission-1/review", "PATCH"],
+    ["/api/dispatcher/assign", "POST"]
+  ];
+
+  for (const [path, method] of protectedRoutes) {
+    const response = await call(path, { method, env });
+    assert.equal(response.status, 401, `${method} ${path} must reject requests without manager authentication`);
+  }
+});
+
 test("AI task execution stays disabled unless explicitly enabled", async () => {
   const env = { WORKFORCE_API_TOKEN: TOKEN, DB: {} };
   const response = await call("/api/tasks/example-task/run", {

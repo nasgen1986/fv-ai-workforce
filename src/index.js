@@ -30,6 +30,38 @@ function safeEqual(a, b) {
   return mismatch === 0;
 }
 
+class PayloadTooLargeError extends Error {}
+
+async function readJson(request, maxBytes = 100000) {
+  const declaredLength = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new PayloadTooLargeError("Request body is too large.");
+  }
+
+  if (!request.body) return {};
+  const reader = request.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      throw new PayloadTooLargeError("Request body is too large.");
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
 function authorized(request, env) {
   const expected = env.WORKFORCE_API_TOKEN;
   if (typeof expected !== "string" || expected.length < 32) return "not-configured";
@@ -77,7 +109,7 @@ async function handleApi(request, env, url) {
       }
 
       if (method === "POST") {
-        const body = await request.json();
+        const body = await readJson(request);
         const { id, name, role } = body || {};
         const capabilities = body?.capabilities ?? [];
         if (
@@ -100,7 +132,7 @@ async function handleApi(request, env, url) {
 
     if (parts[1] === "workers" && parts.length === 3 && method === "PATCH") {
       const workerId = parts[2];
-      const body = await request.json();
+      const body = await readJson(request);
       const status = body?.status;
       if (!["active", "inactive", "paused"].includes(status)) {
         return json({ ok: false, error: "Worker status must be active, inactive, or paused." }, 400);
@@ -117,7 +149,7 @@ async function handleApi(request, env, url) {
     }
 
     if (parts[1] === "dispatcher" && parts[2] === "assign" && parts.length === 3 && method === "POST") {
-      const body = await request.json();
+      const body = await readJson(request);
       const taskId = body?.task_id;
       const requiredCapability = body?.required_capability;
 
@@ -210,7 +242,7 @@ async function handleApi(request, env, url) {
       }
 
       if (method === "POST") {
-        const body = await request.json();
+        const body = await readJson(request);
         const { title } = body || {};
         const description = typeof body?.description === "string" ? body.description : "";
         const priority = body?.priority ?? "normal";
@@ -266,7 +298,7 @@ async function handleApi(request, env, url) {
       }
 
       if (method === "PATCH") {
-        const body = await request.json();
+        const body = await readJson(request);
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           return json({ ok: false, error: "A JSON object is required." }, 400);
         }
@@ -378,7 +410,7 @@ async function handleApi(request, env, url) {
       }
 
       if (method === "POST") {
-        const body = await request.json();
+        const body = await readJson(request);
         const taskId = body?.task_id;
         const actionType = body?.action_type;
         const summary = body?.summary;
@@ -415,7 +447,7 @@ async function handleApi(request, env, url) {
 
     if (parts[1] === "approvals" && parts.length === 3 && method === "PATCH") {
       const approvalId = parts[2];
-      const body = await request.json();
+      const body = await readJson(request);
       const status = body?.status;
       const decisionNote = body?.decision_note ?? "";
       if (!["approved", "rejected"].includes(status)) {
@@ -644,7 +676,7 @@ async function handleApi(request, env, url) {
       }
 
       if (method === "POST") {
-        const body = await request.json();
+        const body = await readJson(request);
         const workerId = body?.worker_id;
         const summary = body?.summary;
         const content = body?.content;
@@ -703,7 +735,7 @@ async function handleApi(request, env, url) {
 
     if (parts[1] === "submissions" && parts.length === 4 && parts[3] === "review" && method === "PATCH") {
       const submissionId = parts[2];
-      const body = await request.json();
+      const body = await readJson(request);
       const status = body?.status;
       const reviewNote = body?.review_note ?? "";
       if (!["accepted", "revision_requested"].includes(status)) {
@@ -758,6 +790,9 @@ async function handleApi(request, env, url) {
 
     return json({ ok: false, error: "API route not found or method not allowed." }, 404);
   } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      return json({ ok: false, error: "Request body is too large." }, 413);
+    }
     if (error instanceof SyntaxError) {
       return json({ ok: false, error: "Request body must be valid JSON." }, 400);
     }

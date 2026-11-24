@@ -163,18 +163,21 @@ async function handleApi(request, env, url) {
         }, 409);
       }
 
-      const assigned = await env.DB.prepare(
-        "UPDATE tasks SET status = 'assigned', assigned_worker_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'pending' AND assigned_worker_id IS NULL"
-      ).bind(selectedWorker.id, task.id).run();
+      const assigned = await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE tasks SET status = 'assigned', assigned_worker_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'pending' AND assigned_worker_id IS NULL"
+        ).bind(selectedWorker.id, task.id),
+        env.DB.prepare(
+          "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'system', 'dispatcher', 'dispatcher_assigned', ? WHERE changes() = 1"
+        ).bind(task.id, JSON.stringify({
+          worker_id: selectedWorker.id,
+          required_capability: requiredCapability
+        }))
+      ]);
 
-      if (assigned.meta?.changes === 0) {
+      if (assigned?.[0]?.meta?.changes === 0) {
         return json({ ok: false, error: "Task was assigned or changed by another request. Refresh and try again." }, 409);
       }
-
-      await recordEvent(env.DB, task.id, "system", "dispatcher", "dispatcher_assigned", {
-        worker_id: selectedWorker.id,
-        required_capability: requiredCapability
-      });
 
       const updatedTask = await env.DB.prepare(
         "SELECT * FROM tasks WHERE id = ?"
@@ -224,14 +227,18 @@ async function handleApi(request, env, url) {
         }
 
         const id = crypto.randomUUID();
-        await env.DB.prepare(
-          "INSERT INTO tasks (id, title, description, priority, created_by, requires_approval) VALUES (?, ?, ?, ?, 'manager', ?)"
-        ).bind(id, title.trim(), description, priority, requiresApproval).run();
-        await recordEvent(env.DB, id, "manager", "manager", "task_created", {
-          title: title.trim(),
-          priority,
-          requires_approval: requiresApproval === 1
-        });
+        await env.DB.batch([
+          env.DB.prepare(
+            "INSERT INTO tasks (id, title, description, priority, created_by, requires_approval) VALUES (?, ?, ?, ?, 'manager', ?)"
+          ).bind(id, title.trim(), description, priority, requiresApproval),
+          env.DB.prepare(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) VALUES (?, 'manager', 'manager', 'task_created', ?)"
+          ).bind(id, JSON.stringify({
+            title: title.trim(),
+            priority,
+            requires_approval: requiresApproval === 1
+          }))
+        ]);
 
         return json({
           ok: true,
@@ -388,13 +395,17 @@ async function handleApi(request, env, url) {
         if (!task) return json({ ok: false, error: "Task not found." }, 404);
 
         const id = crypto.randomUUID();
-        await env.DB.prepare(
-          "INSERT INTO approval_requests (id, task_id, action_type, summary) VALUES (?, ?, ?, ?)"
-        ).bind(id, taskId.trim(), actionType.trim(), summary.trim()).run();
-        await recordEvent(env.DB, taskId.trim(), "manager", "manager", "approval_requested", {
-          approval_id: id,
-          action_type: actionType.trim()
-        });
+        await env.DB.batch([
+          env.DB.prepare(
+            "INSERT INTO approval_requests (id, task_id, action_type, summary) VALUES (?, ?, ?, ?)"
+          ).bind(id, taskId.trim(), actionType.trim(), summary.trim()),
+          env.DB.prepare(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) VALUES (?, 'manager', 'manager', 'approval_requested', ?)"
+          ).bind(taskId.trim(), JSON.stringify({
+            approval_id: id,
+            action_type: actionType.trim()
+          }))
+        ]);
         const approval = await env.DB.prepare(
           "SELECT * FROM approval_requests WHERE id = ?"
         ).bind(id).first();
@@ -421,17 +432,21 @@ async function handleApi(request, env, url) {
         return json({ ok: false, error: "This approval request has already been decided." }, 409);
       }
 
-      const update = await env.DB.prepare(
-        "UPDATE approval_requests SET status = ?, decided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), decision_note = ? WHERE id = ? AND status = 'pending'"
-      ).bind(status, decisionNote.trim(), approvalId).run();
-      if (update.meta?.changes === 0) {
+      const update = await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE approval_requests SET status = ?, decided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), decision_note = ? WHERE id = ? AND status = 'pending'"
+        ).bind(status, decisionNote.trim(), approvalId),
+        env.DB.prepare(
+          "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'manager', 'manager', 'approval_decided', ? WHERE changes() = 1"
+        ).bind(current.task_id, JSON.stringify({
+          approval_id: approvalId,
+          status,
+          decision_note: decisionNote.trim()
+        }))
+      ]);
+      if (update?.[0]?.meta?.changes === 0) {
         return json({ ok: false, error: "This approval request has already been decided." }, 409);
       }
-      await recordEvent(env.DB, current.task_id, "manager", "manager", "approval_decided", {
-        approval_id: approvalId,
-        status,
-        decision_note: decisionNote.trim()
-      });
       const approval = await env.DB.prepare(
         "SELECT * FROM approval_requests WHERE id = ?"
       ).bind(approvalId).first();
@@ -677,13 +692,17 @@ async function handleApi(request, env, url) {
         }
 
         const id = crypto.randomUUID();
-        await env.DB.prepare(
-          "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) VALUES (?, ?, ?, ?, ?)"
-        ).bind(id, taskId, workerId, summary.trim(), content.trim()).run();
-        await recordEvent(env.DB, taskId, "worker", workerId, "work_submitted", {
-          submission_id: id,
-          summary: summary.trim()
-        });
+        await env.DB.batch([
+          env.DB.prepare(
+            "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) VALUES (?, ?, ?, ?, ?)"
+          ).bind(id, taskId, workerId, summary.trim(), content.trim()),
+          env.DB.prepare(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) VALUES (?, 'worker', ?, 'work_submitted', ?)"
+          ).bind(taskId, workerId, JSON.stringify({
+            submission_id: id,
+            summary: summary.trim()
+          }))
+        ]);
         const submission = await env.DB.prepare(
           "SELECT * FROM task_submissions WHERE id = ?"
         ).bind(id).first();

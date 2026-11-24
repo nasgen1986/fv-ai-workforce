@@ -113,3 +113,136 @@ test("task PATCH cannot mark a task completed without accepting a submission", a
   const body = await response.json();
   assert.match(body.error, /only be completed by accepting a submitted work item/i);
 });
+
+
+test("generic task PATCH rejects workflow-bypassing status transitions", async () => {
+  const currentTask = {
+    id: "task-pending",
+    status: "pending",
+    priority: "normal",
+    assigned_worker_id: null,
+    completed_at: null
+  };
+  let batchCalled = false;
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            first: async () => {
+              if (sql === "SELECT * FROM tasks WHERE id = ?") return currentTask;
+              throw new Error("Unexpected query in transition guard test.");
+            }
+          };
+        }
+      };
+    },
+    async batch() {
+      batchCalled = true;
+      throw new Error("Batch must not run for a rejected transition.");
+    }
+  };
+  const response = await call("/api/tasks/task-pending", {
+    method: "PATCH",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { status: "in_progress" }
+  });
+  assert.equal(response.status, 409);
+  assert.equal(batchCalled, false);
+  assert.match((await response.json()).error, /transition is not allowed/i);
+});
+
+test("failed task can only be reset to assigned with an active assigned worker", async () => {
+  const currentTask = {
+    id: "task-failed",
+    status: "failed",
+    priority: "normal",
+    assigned_worker_id: "worker-1",
+    completed_at: null
+  };
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            first: async () => {
+              if (sql === "SELECT * FROM tasks WHERE id = ?") return currentTask;
+              if (sql === "SELECT id, status FROM workers WHERE id = ?") {
+                return { id: "worker-1", status: "active" };
+              }
+              if (sql === "SELECT * FROM tasks WHERE id = ?") return { ...currentTask, status: "assigned" };
+              throw new Error("Unexpected query in failed-task reset test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      assert.equal(statements.length, 2);
+      assert.match(statements[0].sql, /WHERE id = \? AND status = \?/);
+      assert.match(statements[1].sql, /WHERE changes\(\) = 1/);
+      return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+    }
+  };
+  const response = await call("/api/tasks/task-failed", {
+    method: "PATCH",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { status: "assigned" }
+  });
+  assert.equal(response.status, 200);
+});
+
+test("submission review uses one atomic D1 batch for submission, task, and audit", async () => {
+  const submission = {
+    id: "submission-1",
+    task_id: "task-1",
+    worker_id: "worker-1",
+    status: "submitted",
+    task_status: "in_progress"
+  };
+  let batchCount = 0;
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            first: async () => {
+              if (sql.includes("SELECT s.*, t.requires_approval")) return submission;
+              if (sql === "SELECT * FROM task_submissions WHERE id = ?") {
+                return { ...submission, status: "accepted" };
+              }
+              if (sql === "SELECT * FROM tasks WHERE id = ?") {
+                return { id: "task-1", status: "completed" };
+              }
+              throw new Error("Unexpected query in atomic review test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      batchCount += 1;
+      assert.equal(statements.length, 3);
+      assert.match(statements[0].sql, /status = 'submitted'/);
+      assert.match(statements[1].sql, /changes\(\) = 1/);
+      assert.match(statements[2].sql, /changes\(\) = 1/);
+      return [
+        { meta: { changes: 1 } },
+        { meta: { changes: 1 } },
+        { meta: { changes: 1 } }
+      ];
+    }
+  };
+  const response = await call("/api/submissions/submission-1/review", {
+    method: "PATCH",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { status: "accepted", review_note: "Looks good." }
+  });
+  assert.equal(response.status, 200);
+  assert.equal(batchCount, 1);
+  const body = await response.json();
+  assert.equal(body.task.status, "completed");
+});

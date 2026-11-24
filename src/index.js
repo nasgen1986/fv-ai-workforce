@@ -138,6 +138,80 @@ async function handleApi(request, env, url) {
       return json({ ok: true, worker });
     }
 
+    if (parts[1] === "dispatcher" && parts[2] === "assign" && parts.length === 3 && method === "POST") {
+      const body = await request.json();
+      const taskId = body?.task_id;
+      const requiredCapability = body?.required_capability;
+
+      if (typeof taskId !== "string" || !taskId.trim()) {
+        return json({ ok: false, error: "A task_id is required." }, 400);
+      }
+      if (typeof requiredCapability !== "string" ||
+          !/^[a-zA-Z0-9_-]{2,80}$/.test(requiredCapability)) {
+        return json({ ok: false, error: "A valid required_capability is required." }, 400);
+      }
+
+      const task = await env.DB.prepare(
+        "SELECT id, title, status, assigned_worker_id FROM tasks WHERE id = ?"
+      ).bind(taskId.trim()).first();
+      if (!task) return json({ ok: false, error: "Task not found." }, 404);
+      if (task.status !== "pending" || task.assigned_worker_id !== null) {
+        return json({ ok: false, error: "Dispatcher can only assign pending, unassigned tasks." }, 409);
+      }
+
+      const activeWorkers = await env.DB.prepare(
+        "SELECT id, name, role, status, capabilities_json FROM workers WHERE status = 'active' ORDER BY created_at, id"
+      ).all();
+
+      let selectedWorker = null;
+      for (const candidate of activeWorkers.results || []) {
+        let capabilities = [];
+        try {
+          capabilities = JSON.parse(candidate.capabilities_json || "[]");
+        } catch {
+          continue;
+        }
+        if (Array.isArray(capabilities) && capabilities.includes(requiredCapability)) {
+          selectedWorker = { id: candidate.id, name: candidate.name, role: candidate.role };
+          break;
+        }
+      }
+
+      if (!selectedWorker) {
+        return json({
+          ok: false,
+          error: "No active worker currently supports the requested capability.",
+          required_capability: requiredCapability
+        }, 409);
+      }
+
+      const assigned = await env.DB.prepare(
+        "UPDATE tasks SET status = 'assigned', assigned_worker_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'pending' AND assigned_worker_id IS NULL"
+      ).bind(selectedWorker.id, task.id).run();
+
+      if (assigned.meta?.changes === 0) {
+        return json({ ok: false, error: "Task was assigned or changed by another request. Refresh and try again." }, 409);
+      }
+
+      await recordEvent(env.DB, task.id, "system", "dispatcher", "dispatcher_assigned", {
+        worker_id: selectedWorker.id,
+        required_capability: requiredCapability
+      });
+
+      const updatedTask = await env.DB.prepare(
+        "SELECT * FROM tasks WHERE id = ?"
+      ).bind(task.id).first();
+
+      return json({
+        ok: true,
+        dispatcher: "capability_match",
+        assigned_worker: selectedWorker,
+        required_capability: requiredCapability,
+        task: updatedTask,
+        message: "Task assigned by the dispatcher. Worker execution still requires a separate manager-approved run."
+      });
+    }
+
     if (parts[1] === "tasks" && parts.length === 2) {
       if (method === "GET") {
         const status = url.searchParams.get("status");

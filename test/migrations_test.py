@@ -174,6 +174,30 @@ class MigrationAndTransactionTests(unittest.TestCase):
             "assigned",
         )
 
+    def test_dispatcher_does_not_assign_a_worker_paused_after_selection(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status, capabilities_json) "
+            "VALUES ('worker-1', 'Worker', 'research', 'active', '[\"read_only_research\"]')"
+        )
+        self.seed_task(status="pending")
+        # Simulate a pause between dispatcher selection and its guarded UPDATE.
+        self.db.execute("UPDATE workers SET status='paused' WHERE id='worker-1'")
+
+        self.db.execute("BEGIN")
+        self.db.execute(
+            "UPDATE tasks SET status='assigned', assigned_worker_id='worker-1' "
+            "WHERE id='task-1' AND status='pending' AND assigned_worker_id IS NULL "
+            "AND EXISTS (SELECT 1 FROM workers WHERE id='worker-1' AND status='active')"
+        )
+        changed = self.db.execute("SELECT changes()").fetchone()[0]
+        self.db.execute("ROLLBACK")
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(
+            self.db.execute("SELECT status FROM tasks WHERE id='task-1'").fetchone()[0],
+            "pending",
+        )
+
     def test_dispatcher_assignment_is_idempotent_under_duplicate_requests(self):
         self.db.execute(
             "INSERT INTO workers (id, name, role, status, capabilities_json) "

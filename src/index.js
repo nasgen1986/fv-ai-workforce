@@ -311,6 +311,118 @@ async function handleApi(request, env, url) {
       return json({ ok: true, approval, action_executed: false });
     }
 
+
+    if (parts[1] === "workers" && parts.length === 4 && parts[3] === "tasks" && method === "GET") {
+      const workerId = parts[2];
+      const worker = await env.DB.prepare("SELECT id FROM workers WHERE id = ?").bind(workerId).first();
+      if (!worker) return json({ ok: false, error: "Worker not found." }, 404);
+      const result = await env.DB.prepare(
+        "SELECT * FROM tasks WHERE assigned_worker_id = ? ORDER BY created_at DESC LIMIT 100"
+      ).bind(workerId).all();
+      return json({ ok: true, tasks: result.results || [] });
+    }
+
+    if (parts[1] === "tasks" && parts.length === 4 && parts[3] === "submissions") {
+      const taskId = parts[2];
+      const task = await env.DB.prepare("SELECT id FROM tasks WHERE id = ?").bind(taskId).first();
+      if (!task) return json({ ok: false, error: "Task not found." }, 404);
+
+      if (method === "GET") {
+        const result = await env.DB.prepare(
+          "SELECT s.*, w.name AS worker_name FROM task_submissions s JOIN workers w ON w.id = s.worker_id WHERE s.task_id = ? ORDER BY s.submitted_at DESC"
+        ).bind(taskId).all();
+        return json({ ok: true, submissions: result.results || [] });
+      }
+
+      if (method === "POST") {
+        const body = await request.json();
+        const workerId = body?.worker_id;
+        const summary = body?.summary;
+        const content = body?.content;
+        if (typeof workerId !== "string" || !workerId.trim()) {
+          return json({ ok: false, error: "A worker_id is required." }, 400);
+        }
+        if (typeof summary !== "string" || !summary.trim() || summary.length > 500) {
+          return json({ ok: false, error: "summary must be 1–500 characters." }, 400);
+        }
+        if (typeof content !== "string" || !content.trim() || content.length > 20000) {
+          return json({ ok: false, error: "content must be 1–20,000 characters." }, 400);
+        }
+        const assigned = await env.DB.prepare(
+          "SELECT t.*, w.status AS worker_status FROM tasks t LEFT JOIN workers w ON w.id = t.assigned_worker_id WHERE t.id = ?"
+        ).bind(taskId).first();
+        if (assigned.assigned_worker_id !== workerId) {
+          return json({ ok: false, error: "This task is not assigned to that worker." }, 403);
+        }
+        if (assigned.worker_status !== "active") {
+          return json({ ok: false, error: "The assigned worker must be active to submit work." }, 409);
+        }
+        if (!["assigned", "in_progress"].includes(assigned.status)) {
+          return json({ ok: false, error: "Task must be assigned or in progress before submission." }, 409);
+        }
+
+        const id = crypto.randomUUID();
+        await env.DB.prepare(
+          "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) VALUES (?, ?, ?, ?, ?)"
+        ).bind(id, taskId, workerId, summary.trim(), content.trim()).run();
+        await recordEvent(env.DB, taskId, "worker", workerId, "work_submitted", {
+          submission_id: id,
+          summary: summary.trim()
+        });
+        const submission = await env.DB.prepare(
+          "SELECT * FROM task_submissions WHERE id = ?"
+        ).bind(id).first();
+        return json({ ok: true, submission }, 201);
+      }
+    }
+
+    if (parts[1] === "submissions" && parts.length === 4 && parts[3] === "review" && method === "PATCH") {
+      const submissionId = parts[2];
+      const body = await request.json();
+      const status = body?.status;
+      const reviewNote = body?.review_note ?? "";
+      if (!["accepted", "revision_requested"].includes(status)) {
+        return json({ ok: false, error: "Review status must be accepted or revision_requested." }, 400);
+      }
+      if (typeof reviewNote !== "string" || reviewNote.length > 2000) {
+        return json({ ok: false, error: "review_note must be 2,000 characters or fewer." }, 400);
+      }
+      const current = await env.DB.prepare(
+        "SELECT s.*, t.requires_approval, t.status AS task_status FROM task_submissions s JOIN tasks t ON t.id = s.task_id WHERE s.id = ?"
+      ).bind(submissionId).first();
+      if (!current) return json({ ok: false, error: "Submission not found." }, 404);
+      if (current.status !== "submitted") {
+        return json({ ok: false, error: "This submission has already been reviewed." }, 409);
+      }
+      const update = await env.DB.prepare(
+        "UPDATE task_submissions SET status = ?, reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), review_note = ? WHERE id = ? AND status = 'submitted'"
+      ).bind(status, reviewNote.trim(), submissionId).run();
+      if (update.meta?.changes === 0) {
+        return json({ ok: false, error: "This submission has already been reviewed." }, 409);
+      }
+
+      if (status === "accepted") {
+        const nextTaskStatus = current.requires_approval === 1 ? "waiting_approval" : "completed";
+        await env.DB.prepare(
+          "UPDATE tasks SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = ? WHERE id = ?"
+        ).bind(nextTaskStatus, nextTaskStatus === "completed" ? new Date().toISOString() : null, current.task_id).run();
+      } else {
+        await env.DB.prepare(
+          "UPDATE tasks SET status = 'in_progress', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ?"
+        ).bind(current.task_id).run();
+      }
+      await recordEvent(env.DB, current.task_id, "manager", "manager", "submission_reviewed", {
+        submission_id: submissionId,
+        status,
+        review_note: reviewNote.trim()
+      });
+      const submission = await env.DB.prepare(
+        "SELECT * FROM task_submissions WHERE id = ?"
+      ).bind(submissionId).first();
+      const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(current.task_id).first();
+      return json({ ok: true, submission, task });
+    }
+
     return json({ ok: false, error: "API route not found or method not allowed." }, 404);
   } catch (error) {
     if (error instanceof SyntaxError) {
@@ -340,8 +452,8 @@ export default {
         ok: true,
         service: "FV AI Workforce",
         status: "starter-online",
-        version: "0.4.0",
-        stage: "approval-api-foundation",
+        version: "0.5.0",
+        stage: "worker-coordination-foundation",
         integrations: {
           fliptopVault: false,
           firebase: false,
@@ -364,11 +476,11 @@ export default {
 
       try {
         const result = await env.DB.prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('workers', 'tasks', 'task_events', 'approval_requests') ORDER BY name"
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('workers', 'tasks', 'task_events', 'approval_requests', 'task_submissions') ORDER BY name"
         ).all();
 
         const tables = (result.results || []).map((row) => row.name);
-        const expected = ["approval_requests", "task_events", "tasks", "workers"];
+        const expected = ["approval_requests", "task_events", "task_submissions", "tasks", "workers"];
         const schemaReady = expected.every((name) => tables.includes(name));
 
         return json({

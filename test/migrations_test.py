@@ -29,7 +29,7 @@ class MigrationAndTransactionTests(unittest.TestCase):
             )
         }
         self.assertTrue(
-            {"workers", "tasks", "task_events", "approval_requests", "task_submissions"}
+            {"workers", "tasks", "task_events", "approval_requests", "task_submissions", "worker_credentials"}
             .issubset(names)
         )
         columns = {
@@ -37,6 +37,46 @@ class MigrationAndTransactionTests(unittest.TestCase):
             for row in self.db.execute("PRAGMA table_info(approval_requests)")
         }
         self.assertIn("consumed_at", columns)
+
+    def test_worker_credentials_store_only_hashes_and_allow_one_active_token(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status) "
+            "VALUES ('worker-1', 'Worker', 'research', 'active')"
+        )
+        columns = {
+            row["name"]
+            for row in self.db.execute("PRAGMA table_info(worker_credentials)")
+        }
+        self.assertIn("token_hash", columns)
+        self.assertNotIn("token", columns)
+
+        self.db.execute(
+            "INSERT INTO worker_credentials (id, worker_id, token_hash) "
+            "VALUES ('credential-1', 'worker-1', ?)",
+            ("a" * 64,),
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                "INSERT INTO worker_credentials (id, worker_id, token_hash) "
+                "VALUES ('credential-2', 'worker-1', ?)",
+                ("b" * 64,),
+            )
+
+        self.db.execute(
+            "UPDATE worker_credentials SET status='revoked', revoked_at='now' "
+            "WHERE id='credential-1'"
+        )
+        self.db.execute(
+            "INSERT INTO worker_credentials (id, worker_id, token_hash) "
+            "VALUES ('credential-2', 'worker-1', ?)",
+            ("b" * 64,),
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT COUNT(*) FROM worker_credentials WHERE worker_id='worker-1' AND status='active'"
+            ).fetchone()[0],
+            1,
+        )
 
     def test_execution_approval_can_only_be_consumed_once(self):
         self.seed_task(status="assigned")

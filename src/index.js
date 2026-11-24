@@ -272,6 +272,15 @@ async function handleApi(request, env, url) {
         if (!TASK_STATUSES.has(nextStatus)) return json({ ok: false, error: "Invalid task status." }, 400);
         if (!PRIORITIES.has(nextPriority)) return json({ ok: false, error: "Invalid task priority." }, 400);
 
+        // Successful completion must only happen through the submission review route.
+        // This prevents a generic task PATCH from bypassing manager acceptance.
+        if (nextStatus === "completed" && current.status !== "completed") {
+          return json({
+            ok: false,
+            error: "A task can only be completed by accepting a submitted work item."
+          }, 409);
+        }
+
         if (nextWorker !== null) {
           if (typeof nextWorker !== "string") return json({ ok: false, error: "Invalid worker id." }, 400);
           const worker = await env.DB.prepare("SELECT id, status FROM workers WHERE id = ?").bind(nextWorker).first();

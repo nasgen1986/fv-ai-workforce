@@ -227,6 +227,90 @@ async function handleApi(request, env, url) {
       }
     }
 
+
+    if (parts[1] === "approvals" && parts.length === 2) {
+      if (method === "GET") {
+        const status = url.searchParams.get("status");
+        if (status && !["pending", "approved", "rejected"].includes(status)) {
+          return json({ ok: false, error: "Invalid approval status." }, 400);
+        }
+        const query = status
+          ? "SELECT a.*, t.title AS task_title FROM approval_requests a JOIN tasks t ON t.id = a.task_id WHERE a.status = ? ORDER BY a.requested_at DESC LIMIT 100"
+          : "SELECT a.*, t.title AS task_title FROM approval_requests a JOIN tasks t ON t.id = a.task_id ORDER BY a.requested_at DESC LIMIT 100";
+        const result = status
+          ? await env.DB.prepare(query).bind(status).all()
+          : await env.DB.prepare(query).all();
+        return json({ ok: true, approvals: result.results || [] });
+      }
+
+      if (method === "POST") {
+        const body = await request.json();
+        const taskId = body?.task_id;
+        const actionType = body?.action_type;
+        const summary = body?.summary;
+        if (typeof taskId !== "string" || !taskId.trim()) {
+          return json({ ok: false, error: "A task_id is required." }, 400);
+        }
+        if (typeof actionType !== "string" || !actionType.trim() || actionType.length > 100) {
+          return json({ ok: false, error: "action_type must be 1–100 characters." }, 400);
+        }
+        if (typeof summary !== "string" || !summary.trim() || summary.length > 2000) {
+          return json({ ok: false, error: "summary must be 1–2,000 characters." }, 400);
+        }
+        const task = await env.DB.prepare("SELECT id FROM tasks WHERE id = ?").bind(taskId.trim()).first();
+        if (!task) return json({ ok: false, error: "Task not found." }, 404);
+
+        const id = crypto.randomUUID();
+        await env.DB.prepare(
+          "INSERT INTO approval_requests (id, task_id, action_type, summary) VALUES (?, ?, ?, ?)"
+        ).bind(id, taskId.trim(), actionType.trim(), summary.trim()).run();
+        await recordEvent(env.DB, taskId.trim(), "manager", "manager", "approval_requested", {
+          approval_id: id,
+          action_type: actionType.trim()
+        });
+        const approval = await env.DB.prepare(
+          "SELECT * FROM approval_requests WHERE id = ?"
+        ).bind(id).first();
+        return json({ ok: true, approval }, 201);
+      }
+    }
+
+    if (parts[1] === "approvals" && parts.length === 3 && method === "PATCH") {
+      const approvalId = parts[2];
+      const body = await request.json();
+      const status = body?.status;
+      const decisionNote = body?.decision_note ?? "";
+      if (!["approved", "rejected"].includes(status)) {
+        return json({ ok: false, error: "Approval status must be approved or rejected." }, 400);
+      }
+      if (typeof decisionNote !== "string" || decisionNote.length > 2000) {
+        return json({ ok: false, error: "decision_note must be 2,000 characters or fewer." }, 400);
+      }
+      const current = await env.DB.prepare(
+        "SELECT * FROM approval_requests WHERE id = ?"
+      ).bind(approvalId).first();
+      if (!current) return json({ ok: false, error: "Approval request not found." }, 404);
+      if (current.status !== "pending") {
+        return json({ ok: false, error: "This approval request has already been decided." }, 409);
+      }
+
+      const update = await env.DB.prepare(
+        "UPDATE approval_requests SET status = ?, decided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), decision_note = ? WHERE id = ? AND status = 'pending'"
+      ).bind(status, decisionNote.trim(), approvalId).run();
+      if (update.meta?.changes === 0) {
+        return json({ ok: false, error: "This approval request has already been decided." }, 409);
+      }
+      await recordEvent(env.DB, current.task_id, "manager", "manager", "approval_decided", {
+        approval_id: approvalId,
+        status,
+        decision_note: decisionNote.trim()
+      });
+      const approval = await env.DB.prepare(
+        "SELECT * FROM approval_requests WHERE id = ?"
+      ).bind(approvalId).first();
+      return json({ ok: true, approval, action_executed: false });
+    }
+
     return json({ ok: false, error: "API route not found or method not allowed." }, 404);
   } catch (error) {
     if (error instanceof SyntaxError) {
@@ -256,8 +340,8 @@ export default {
         ok: true,
         service: "FV AI Workforce",
         status: "starter-online",
-        version: "0.3.0",
-        stage: "task-api-foundation",
+        version: "0.4.0",
+        stage: "approval-api-foundation",
         integrations: {
           fliptopVault: false,
           firebase: false,

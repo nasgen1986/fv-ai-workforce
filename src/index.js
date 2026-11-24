@@ -77,6 +77,17 @@ async function recordEvent(db, taskId, actorType, actorId, eventType, payload = 
   ).bind(taskId, actorType, actorId, eventType, JSON.stringify(payload)).run();
 }
 
+async function markTaskFailed(db, taskId, actorType, actorId, eventType, payload) {
+  await db.batch([
+    db.prepare(
+      "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ? AND status = 'in_progress'"
+    ).bind(taskId),
+    db.prepare(
+      "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, ?, ?, ?, ? WHERE changes() = 1"
+    ).bind(taskId, actorType, actorId, eventType, JSON.stringify(payload))
+  ]);
+}
+
 async function handleApi(request, env, url) {
   const auth = authorized(request, env);
   if (auth === "not-configured") {
@@ -594,10 +605,7 @@ async function handleApi(request, env, url) {
           max_tokens: 1024
         });
       } catch {
-        await env.DB.prepare(
-          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ? AND status = 'in_progress'"
-        ).bind(taskId).run();
-        await recordEvent(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
+        await markTaskFailed(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
           reason: "AI inference request failed",
           retry_requires_new_approval: true
         });
@@ -610,10 +618,7 @@ async function handleApi(request, env, url) {
         (typeof result?.response === "string" ? result.response : "");
 
       if (typeof content !== "string" || !content.trim()) {
-        await env.DB.prepare(
-          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ? AND status = 'in_progress'"
-        ).bind(taskId).run();
-        await recordEvent(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
+        await markTaskFailed(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
           reason: "AI returned no usable text",
           retry_requires_new_approval: true
         });
@@ -640,10 +645,7 @@ async function handleApi(request, env, url) {
           }))
         ]);
       } catch {
-        await env.DB.prepare(
-          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ? AND status = 'in_progress'"
-        ).bind(taskId).run();
-        await recordEvent(env.DB, taskId, "system", "submission_persistence", "ai_submission_save_failed", {
+        await markTaskFailed(env.DB, taskId, "system", "submission_persistence", "ai_submission_save_failed", {
           retry_requires_new_approval: true
         });
         return json({ ok: false, error: "AI work could not be saved. The task is marked failed. A manager must reset it and approve a new execution before retrying." }, 500);

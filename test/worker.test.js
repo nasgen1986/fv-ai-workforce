@@ -167,6 +167,23 @@ test("worker credentials are hashed, scoped to one worker, and cannot access man
     env
   });
   assert.equal(otherWorker.status, 403);
+
+  const managerOnlyRoutes = [
+    ["/api/workers", "GET"],
+    ["/api/workers/worker-1/credentials", "POST"],
+    ["/api/workers/worker-1/credentials", "DELETE"],
+    ["/api/tasks", "POST"],
+    ["/api/tasks/task-1/run", "POST"],
+    ["/api/tasks/task-1/submissions", "GET"],
+    ["/api/approvals", "POST"],
+    ["/api/approvals/approval-1", "PATCH"],
+    ["/api/submissions/submission-1/review", "PATCH"],
+    ["/api/dispatcher/assign", "POST"]
+  ];
+  for (const [path, method] of managerOnlyRoutes) {
+    const response = await call(path, { method, token: workerToken, env });
+    assert.equal(response.status, 403, `${method} ${path} must remain manager-only`);
+  }
 });
 
 test("worker credentials can read only their own assigned task summaries", async () => {
@@ -280,6 +297,35 @@ test("worker credentials cannot impersonate another worker in a submission", asy
     body: { worker_id: "worker-2", summary: "Impersonation", content: "Must be rejected" }
   });
   assert.equal(response.status, 403);
+});
+
+test("manager can revoke active worker credentials", async () => {
+  let revokeSql = "";
+  let revokeWorkerId = "";
+  const db = {
+    prepare(sql) {
+      return {
+        bind(workerId) {
+          return {
+            run: async () => {
+              revokeSql = sql;
+              revokeWorkerId = workerId;
+              return { meta: { changes: 1 } };
+            }
+          };
+        }
+      };
+    }
+  };
+  const response = await call("/api/workers/worker-1/credentials", {
+    method: "DELETE",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db }
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).revoked, 1);
+  assert.match(revokeSql, /status = 'revoked'/);
+  assert.equal(revokeWorkerId, "worker-1");
 });
 
 test("manager can issue one-time worker tokens without storing plaintext", async () => {

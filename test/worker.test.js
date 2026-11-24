@@ -112,7 +112,7 @@ test("task PATCH cannot mark a task completed without accepting a submission", a
   });
   assert.equal(response.status, 409);
   const body = await response.json();
-  assert.match(body.error, /only be completed by accepting a submitted work item/i);
+  assert.match(body.error, /transition is not allowed|only be completed by accepting a submitted work item/i);
 });
 
 

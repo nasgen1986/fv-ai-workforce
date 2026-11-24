@@ -534,15 +534,30 @@ async function handleApi(request, env, url) {
       const cleanContent = content.trim().slice(0, 20000);
       const summary = cleanContent.replace(/\s+/g, " ").slice(0, 500);
 
-      await env.DB.prepare(
-        "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) VALUES (?, ?, ?, ?, ?)"
-      ).bind(submissionId, taskId, worker.id, summary, cleanContent).run();
-
-      await recordEvent(env.DB, taskId, "worker", worker.id, "ai_work_submitted", {
-        submission_id: submissionId,
-        model: "@cf/google/gemma-4-26b-a4b-it",
-        usage: result?.usage ?? result?.response?.usage ?? null
-      });
+      // Save the submission and its audit event atomically. If either write fails,
+      // neither should be left behind while the execution approval is already consumed.
+      try {
+        await env.DB.batch([
+          env.DB.prepare(
+            "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) VALUES (?, ?, ?, ?, ?)"
+          ).bind(submissionId, taskId, worker.id, summary, cleanContent),
+          env.DB.prepare(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) VALUES (?, 'worker', ?, 'ai_work_submitted', ?)"
+          ).bind(taskId, worker.id, JSON.stringify({
+            submission_id: submissionId,
+            model: "@cf/google/gemma-4-26b-a4b-it",
+            usage: result?.usage ?? result?.response?.usage ?? null
+          }))
+        ]);
+      } catch {
+        await env.DB.prepare(
+          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = NULL WHERE id = ? AND status = 'in_progress'"
+        ).bind(taskId).run();
+        await recordEvent(env.DB, taskId, "system", "submission_persistence", "ai_submission_save_failed", {
+          retry_requires_new_approval: true
+        });
+        return json({ ok: false, error: "AI work could not be saved. The task is marked failed. A manager must reset it and approve a new execution before retrying." }, 500);
+      }
 
       const submission = await env.DB.prepare(
         "SELECT * FROM task_submissions WHERE id = ?"

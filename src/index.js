@@ -862,18 +862,30 @@ export default {
         ).all();
 
         const tables = (result.results || []).map((row) => row.name);
-        const expected = ["approval_requests", "task_events", "task_submissions", "tasks", "workers"];
-        const schemaReady = expected.every((name) => tables.includes(name));
+        const expectedTables = ["approval_requests", "task_events", "task_submissions", "tasks", "workers"];
+        const missingTables = expectedTables.filter((name) => !tables.includes(name));
+
+        // Migration 0003 adds consumed_at. Check it explicitly so an older
+        // approval_requests table cannot be reported as fully ready.
+        const approvalColumns = await env.DB.prepare(
+          "SELECT name FROM pragma_table_info('approval_requests')"
+        ).all();
+        const columnNames = (approvalColumns.results || []).map((row) => row.name);
+        const requiredApprovalColumns = ["consumed_at"];
+        const missingColumns = requiredApprovalColumns.filter((name) => !columnNames.includes(name));
+        const schemaReady = missingTables.length === 0 && missingColumns.length === 0;
 
         return json({
           ok: true,
           database: "connected",
           schemaReady,
           tables,
-          expectedTables: expected,
+          expectedTables,
+          missingTables,
+          missingColumns,
           message: schemaReady
-            ? "D1 is connected and the initial schema is ready."
-            : "D1 is connected. Apply the initial database migration to create the tables.",
+            ? "D1 is connected and the required schema is ready."
+            : "D1 is connected, but one or more required tables or columns are missing. Apply the pending database migrations.",
           timestamp: new Date().toISOString()
         });
       } catch {

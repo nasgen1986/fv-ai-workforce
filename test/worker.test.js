@@ -136,6 +136,49 @@ test("direct AI test endpoint remains disabled", async () => {
   assert.match(body.error, /Direct AI tests are disabled/);
 });
 
+test("dispatcher assignment atomically rechecks that the selected worker is still active", async () => {
+  const task = { id: "task-race", title: "Test", status: "pending", assigned_worker_id: null };
+  const workerRow = {
+    id: "worker-1", name: "Research worker", role: "research",
+    status: "active", capabilities_json: '["read_only_research"]'
+  };
+  let batchCalled = false;
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          return {
+            sql, values,
+            first: async () => {
+              if (sql.includes("SELECT id, title, status, assigned_worker_id FROM tasks")) return task;
+              throw new Error("Unexpected query in dispatcher active-worker test: " + sql);
+            },
+            all: async () => {
+              if (sql.includes("FROM workers WHERE status = 'active'")) return { results: [workerRow] };
+              throw new Error("Unexpected list query in dispatcher active-worker test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      batchCalled = true;
+      assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
+      assert.deepEqual(statements[0].values, ["worker-1", "task-race", "worker-1"]);
+      return [{ meta: { changes: 0 } }, { meta: { changes: 0 } }];
+    }
+  };
+  const response = await call("/api/dispatcher/assign", {
+    method: "POST",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { task_id: "task-race", required_capability: "read_only_research" }
+  });
+  assert.equal(response.status, 409);
+  assert.equal(batchCalled, true);
+  assert.match((await response.json()).error, /changed by another request/i);
+});
+
 test("task PATCH cannot mark a task completed without accepting a submission", async () => {
   const currentTask = {
     id: "task-1",

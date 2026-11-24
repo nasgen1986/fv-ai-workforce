@@ -47,8 +47,11 @@ test("GET /health/db detects a missing single-use approval migration column", as
       return {
         all: async () => {
           if (sql.includes("sqlite_master")) return { results: tables.map((name) => ({ name })) };
-          if (sql.includes("pragma_table_info")) {
+          if (sql.includes("pragma_table_info('approval_requests')")) {
             return { results: [{ name: "id" }, { name: "task_id" }, { name: "status" }] };
+          }
+          if (sql.includes("pragma_table_info('worker_credentials')")) {
+            return { results: ["id", "worker_id", "token_hash", "status", "created_at", "revoked_at"].map((name) => ({ name })) };
           }
           throw new Error("Unexpected health-check query: " + sql);
         }
@@ -78,8 +81,11 @@ test("GET /health/db reports ready only when required tables and consumed_at exi
       return {
         all: async () => {
           if (sql.includes("sqlite_master")) return { results: tables.map((name) => ({ name })) };
-          if (sql.includes("pragma_table_info")) {
+          if (sql.includes("pragma_table_info('approval_requests')")) {
             return { results: [{ name: "id" }, { name: "task_id" }, { name: "status" }, { name: "consumed_at" }] };
+          }
+          if (sql.includes("pragma_table_info('worker_credentials')")) {
+            return { results: ["id", "worker_id", "token_hash", "status", "created_at", "revoked_at"].map((name) => ({ name })) };
           }
           throw new Error("Unexpected health-check query: " + sql);
         }
@@ -906,4 +912,38 @@ test("worker credential lookup failure returns a generic 503", async () => {
     error: "Authentication service unavailable."
   });
   assert.equal(JSON.stringify(body).includes("sensitive database internals"), false);
+});
+
+
+test("GET /health/db detects incomplete worker credential schema", async () => {
+  const tables = [
+    "approval_requests", "task_events", "task_submissions",
+    "tasks", "worker_credentials", "workers"
+  ];
+  const db = {
+    prepare(sql) {
+      return {
+        all: async () => {
+          if (sql.includes("sqlite_master")) return { results: tables.map((name) => ({ name })) };
+          if (sql.includes("pragma_table_info('approval_requests')")) {
+            return { results: [{ name: "consumed_at" }] };
+          }
+          if (sql.includes("pragma_table_info('worker_credentials')")) {
+            return { results: [{ name: "id" }, { name: "status" }] };
+          }
+          throw new Error("Unexpected health-check query: " + sql);
+        }
+      };
+    }
+  };
+  const response = await call("/health/db", { env: { DB: db } });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.schemaReady, false);
+  assert.deepEqual(body.missingTables, []);
+  assert.deepEqual(body.missingColumns, [
+    "worker_credentials.worker_id",
+    "worker_credentials.token_hash",
+    "worker_credentials.revoked_at"
+  ]);
 });

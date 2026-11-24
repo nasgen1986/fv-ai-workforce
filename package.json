@@ -1,0 +1,15 @@
+{
+  "name": "fv-ai-workforce",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Free-first cloud foundation for the FlipTop Vault AI Workforce",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

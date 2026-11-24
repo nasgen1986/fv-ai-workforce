@@ -88,6 +88,24 @@ async function handleApi(request, env, url) {
       }
     }
 
+    if (parts[1] === "workers" && parts.length === 3 && method === "PATCH") {
+      const workerId = parts[2];
+      const body = await request.json();
+      const status = body?.status;
+      if (!["active", "inactive", "paused"].includes(status)) {
+        return json({ ok: false, error: "Worker status must be active, inactive, or paused." }, 400);
+      }
+      const current = await env.DB.prepare("SELECT id FROM workers WHERE id = ?").bind(workerId).first();
+      if (!current) return json({ ok: false, error: "Worker not found." }, 404);
+      await env.DB.prepare(
+        "UPDATE workers SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?"
+      ).bind(status, workerId).run();
+      const worker = await env.DB.prepare(
+        "SELECT id, name, role, status, capabilities_json, created_at, updated_at FROM workers WHERE id = ?"
+      ).bind(workerId).first();
+      return json({ ok: true, worker });
+    }
+
     if (parts[1] === "tasks" && parts.length === 2) {
       if (method === "GET") {
         const status = url.searchParams.get("status");

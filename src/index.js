@@ -717,17 +717,29 @@ async function handleApi(request, env, url) {
         }
 
         const id = crypto.randomUUID();
-        await env.DB.batch([
+        // Enforce assignment, active worker, current task state, approval (when
+        // required), and one outstanding submission in the same atomic write.
+        const inserted = await env.DB.batch([
           env.DB.prepare(
-            "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) VALUES (?, ?, ?, ?, ?)"
-          ).bind(id, taskId, workerId, summary.trim(), content.trim()),
+            "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) " +
+            "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = 'in_progress' AND assigned_worker_id = ?) " +
+            "AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active') " +
+            "AND NOT EXISTS (SELECT 1 FROM task_submissions WHERE task_id = ? AND status = 'submitted') " +
+            "AND (? = 0 OR EXISTS (SELECT 1 FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' AND consumed_at IS NOT NULL))"
+          ).bind(id, taskId, workerId, summary.trim(), content.trim(), taskId, workerId, workerId, taskId, assigned.requires_approval, taskId),
           env.DB.prepare(
-            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) VALUES (?, 'worker', ?, 'work_submitted', ?)"
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'worker', ?, 'work_submitted', ? WHERE changes() = 1"
           ).bind(taskId, workerId, JSON.stringify({
             submission_id: id,
             summary: summary.trim()
           }))
         ]);
+        if (inserted?.[0]?.meta?.changes === 0) {
+          return json({
+            ok: false,
+            error: "The task changed, approval is unavailable, or another submission is already awaiting review."
+          }, 409);
+        }
         const submission = await env.DB.prepare(
           "SELECT * FROM task_submissions WHERE id = ?"
         ).bind(id).first();

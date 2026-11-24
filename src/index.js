@@ -71,18 +71,23 @@ async function handleApi(request, env, url) {
         messages: [
           {
             role: "user",
-            content: "Reply with exactly this sentence and nothing else: FV AI connection successful."
+            content: "Respond with one short sentence only: FV AI connection successful."
           }
         ],
-        max_tokens: 40
+        max_tokens: 256
       });
+
+      const responseText =
+        result?.choices?.[0]?.message?.content ??
+        result?.response?.choices?.[0]?.message?.content ??
+        (typeof result?.response === "string" ? result.response : "");
 
       return json({
         ok: true,
         test: "ai_inference",
         model,
-        response: result?.response ?? result,
-        usage: result?.usage ?? null
+        response: responseText,
+        usage: result?.usage ?? result?.response?.usage ?? null
       });
     }
     if (parts[1] === "workers" && parts.length === 2) {

@@ -94,7 +94,7 @@ async function authenticate(request, env) {
   const credential = await env.DB.prepare(
     "SELECT wc.worker_id FROM worker_credentials wc JOIN workers w ON w.id = wc.worker_id WHERE wc.token_hash = ? AND wc.status = 'active' AND w.status = 'active' LIMIT 1"
   ).bind(tokenHash).first();
-  return credential ? { type: "worker", workerId: credential.worker_id } : false;
+  return credential ? { type: "worker", workerId: credential.worker_id, tokenHash } : false;
 }
 
 async function recordEvent(db, taskId, actorType, actorId, eventType, payload = {}) {
@@ -579,8 +579,8 @@ async function handleApi(request, env, url) {
       const worker = await env.DB.prepare("SELECT id FROM workers WHERE id = ?").bind(workerId).first();
       if (!worker) return json({ ok: false, error: "Worker not found." }, 404);
       const result = await env.DB.prepare(
-        "SELECT id, title, description, status, priority, requires_approval, created_at, updated_at FROM tasks WHERE assigned_worker_id = ? ORDER BY created_at DESC LIMIT 100"
-      ).bind(workerId).all();
+        "SELECT id, title, description, status, priority, requires_approval, created_at, updated_at FROM tasks WHERE assigned_worker_id = ? AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active') AND (? IS NULL OR EXISTS (SELECT 1 FROM worker_credentials WHERE worker_id = ? AND token_hash = ? AND status = 'active')) ORDER BY created_at DESC LIMIT 100"
+      ).bind(workerId, workerId, auth.type === "worker" ? auth.workerId : null, auth.workerId || workerId, auth.tokenHash || "").all();
       return json({ ok: true, tasks: result.results || [] });
     }
 
@@ -804,9 +804,10 @@ async function handleApi(request, env, url) {
             "INSERT INTO task_submissions (id, task_id, worker_id, summary, content) " +
             "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ? AND status = 'in_progress' AND assigned_worker_id = ?) " +
             "AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active') " +
+            "AND (? IS NULL OR EXISTS (SELECT 1 FROM worker_credentials WHERE worker_id = ? AND token_hash = ? AND status = 'active')) " +
             "AND NOT EXISTS (SELECT 1 FROM task_submissions WHERE task_id = ? AND status = 'submitted') " +
             "AND (? = 0 OR EXISTS (SELECT 1 FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' AND consumed_at IS NOT NULL))"
-          ).bind(id, taskId, workerId, summary.trim(), content.trim(), taskId, workerId, workerId, taskId, assigned.requires_approval, taskId),
+          ).bind(id, taskId, workerId, summary.trim(), content.trim(), taskId, workerId, workerId, auth.type === "worker" ? auth.workerId : null, workerId, auth.tokenHash || "", taskId, assigned.requires_approval, taskId),
           env.DB.prepare(
             "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'worker', ?, 'work_submitted', ? WHERE changes() = 1"
           ).bind(taskId, workerId, JSON.stringify({

@@ -62,34 +62,12 @@ async function handleApi(request, env, url) {
       if (method !== "POST") {
         return json({ ok: false, error: "Method not allowed. Use POST." }, 405);
       }
-      if (!env.AI || typeof env.AI.run !== "function") {
-        return json({ ok: false, error: "Workers AI binding is unavailable." }, 503);
-      }
-
-      const model = "@cf/google/gemma-4-26b-a4b-it";
-      const result = await env.AI.run(model, {
-        messages: [
-          {
-            role: "user",
-            content: "Respond with one short sentence only: FV AI connection successful."
-          }
-        ],
-        max_tokens: 256
-      });
-
-      const responseText =
-        result?.choices?.[0]?.message?.content ??
-        result?.response?.choices?.[0]?.message?.content ??
-        (typeof result?.response === "string" ? result.response : "");
-
       return json({
-        ok: true,
-        test: "ai_inference",
-        model,
-        response: responseText,
-        usage: result?.usage ?? result?.response?.usage ?? null
-      });
+        ok: false,
+        error: "Direct AI tests are disabled. AI use requires an explicitly authorized task execution."
+      }, 403);
     }
+
     if (parts[1] === "workers" && parts.length === 2) {
       if (method === "GET") {
         const result = await env.DB.prepare(
@@ -233,7 +211,7 @@ async function handleApi(request, env, url) {
         const { title } = body || {};
         const description = typeof body?.description === "string" ? body.description : "";
         const priority = body?.priority ?? "normal";
-        const requiresApproval = body?.requires_approval === true ? 1 : 0;
+        const requiresApproval = body?.requires_approval === false ? 0 : 1;
 
         if (typeof title !== "string" || !title.trim() || title.length > 200) {
           return json({ ok: false, error: "A task title (1–200 characters) is required." }, 400);
@@ -430,11 +408,6 @@ async function handleApi(request, env, url) {
 
     if (parts[1] === "tasks" && parts.length === 4 && parts[3] === "run" && method === "POST") {
       const taskId = parts[2];
-
-      if (!env.AI || typeof env.AI.run !== "function") {
-        return json({ ok: false, error: "Workers AI binding is unavailable." }, 503);
-      }
-
       const task = await env.DB.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first();
       if (!task) return json({ ok: false, error: "Task not found." }, 404);
       if (task.assigned_worker_id !== "fv-research-agent") {
@@ -442,6 +415,22 @@ async function handleApi(request, env, url) {
       }
       if (task.status !== "assigned") {
         return json({ ok: false, error: "Only assigned tasks can be run. This prevents accidental duplicate AI runs." }, 409);
+      }
+
+      if (task.requires_approval === 1) {
+        const approval = await env.DB.prepare(
+          "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' ORDER BY decided_at DESC LIMIT 1"
+        ).bind(taskId).first();
+        if (!approval) {
+          return json({
+            ok: false,
+            error: "Manager approval is required before this task can execute. Approve an approval request with action_type 'task_execution' for this exact task."
+          }, 403);
+        }
+      }
+
+      if (!env.AI || typeof env.AI.run !== "function") {
+        return json({ ok: false, error: "Workers AI binding is unavailable." }, 503);
       }
 
       const worker = await env.DB.prepare(
@@ -544,7 +533,7 @@ async function handleApi(request, env, url) {
 
     if (parts[1] === "tasks" && parts.length === 4 && parts[3] === "submissions") {
       const taskId = parts[2];
-      const task = await env.DB.prepare("SELECT id FROM tasks WHERE id = ?").bind(taskId).first();
+      const task = await env.DB.prepare("SELECT id, status, requires_approval FROM tasks WHERE id = ?").bind(taskId).first();
       if (!task) return json({ ok: false, error: "Task not found." }, 404);
 
       if (method === "GET") {
@@ -571,14 +560,26 @@ async function handleApi(request, env, url) {
         const assigned = await env.DB.prepare(
           "SELECT t.*, w.status AS worker_status FROM tasks t LEFT JOIN workers w ON w.id = t.assigned_worker_id WHERE t.id = ?"
         ).bind(taskId).first();
+        if (!assigned) return json({ ok: false, error: "Task not found." }, 404);
         if (assigned.assigned_worker_id !== workerId) {
           return json({ ok: false, error: "This task is not assigned to that worker." }, 403);
         }
         if (assigned.worker_status !== "active") {
           return json({ ok: false, error: "The assigned worker must be active to submit work." }, 409);
         }
-        if (!["assigned", "in_progress"].includes(assigned.status)) {
-          return json({ ok: false, error: "Task must be assigned or in progress before submission." }, 409);
+        if (assigned.status !== "in_progress") {
+          return json({ ok: false, error: "Task must be in progress before a worker can submit work." }, 409);
+        }
+        if (assigned.requires_approval === 1) {
+          const approval = await env.DB.prepare(
+            "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' ORDER BY decided_at DESC LIMIT 1"
+          ).bind(taskId).first();
+          if (!approval) {
+            return json({
+              ok: false,
+              error: "Manager approval is required before a worker can submit work for this task."
+            }, 403);
+          }
         }
 
         const id = crypto.randomUUID();
@@ -680,7 +681,7 @@ export default {
           facebook: false,
           aiProvider: false
         },
-        apiAuthentication: env.WORKFORCE_API_TOKEN ? "configured" : "not-configured",
+        apiAuthentication: typeof env.WORKFORCE_API_TOKEN === "string" && env.WORKFORCE_API_TOKEN.length >= 32 ? "valid-length" : "missing-or-too-short",
         timestamp: new Date().toISOString()
       });
     }

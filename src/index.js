@@ -62,13 +62,39 @@ async function readJson(request, maxBytes = 100000) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-function authorized(request, env) {
-  const expected = env.WORKFORCE_API_TOKEN;
-  if (typeof expected !== "string" || expected.length < 32) return "not-configured";
+function bearerToken(request) {
   const supplied = request.headers.get("authorization") || "";
   const prefix = "Bearer ";
-  if (!supplied.startsWith(prefix)) return false;
-  return safeEqual(supplied.slice(prefix.length), expected);
+  return supplied.startsWith(prefix) ? supplied.slice(prefix.length) : "";
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function generateWorkerToken() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
+}
+
+async function authenticate(request, env) {
+  const expected = env.WORKFORCE_API_TOKEN;
+  if (typeof expected !== "string" || expected.length < 32) return "not-configured";
+
+  const supplied = bearerToken(request);
+  if (!supplied) return false;
+  if (safeEqual(supplied, expected)) return { type: "manager" };
+
+  if (supplied.length < 32 || supplied.length > 64 || !env.DB) return false;
+  const tokenHash = await sha256Hex(supplied);
+  const credential = await env.DB.prepare(
+    "SELECT wc.worker_id FROM worker_credentials wc JOIN workers w ON w.id = wc.worker_id WHERE wc.token_hash = ? AND wc.status = 'active' AND w.status = 'active' LIMIT 1"
+  ).bind(tokenHash).first();
+  return credential ? { type: "worker", workerId: credential.worker_id } : false;
 }
 
 async function recordEvent(db, taskId, actorType, actorId, eventType, payload = {}) {
@@ -89,16 +115,25 @@ async function markTaskFailed(db, taskId, actorType, actorId, eventType, payload
 }
 
 async function handleApi(request, env, url) {
-  const auth = authorized(request, env);
+  const method = request.method;
+  const path = url.pathname.replace(/\/$/, "");
+  const parts = path.split("/").filter(Boolean);
+  const auth = await authenticate(request, env);
   if (auth === "not-configured") {
     return json({ ok: false, error: "API authentication is not configured yet." }, 503);
   }
   if (!auth) return json({ ok: false, error: "Unauthorized" }, 401);
   if (!env.DB) return json({ ok: false, error: "Database unavailable" }, 503);
 
-  const method = request.method;
-  const path = url.pathname.replace(/\/$/, "");
-  const parts = path.split("/").filter(Boolean);
+  if (auth.type === "worker") {
+    const ownTaskList = method === "GET" && parts[1] === "workers" &&
+      parts.length === 4 && parts[2] === auth.workerId && parts[3] === "tasks";
+    const ownSubmission = method === "POST" && parts[1] === "tasks" &&
+      parts.length === 4 && parts[3] === "submissions";
+    if (!ownTaskList && !ownSubmission) {
+      return json({ ok: false, error: "Worker credentials cannot access manager routes or another worker's resources." }, 403);
+    }
+  }
 
   try {
     if (parts[1] === "ai" && parts[2] === "test" && parts.length === 3) {
@@ -497,12 +532,54 @@ async function handleApi(request, env, url) {
     }
 
 
+    if (parts[1] === "workers" && parts.length === 4 && parts[3] === "credentials") {
+      const workerId = parts[2];
+      if (method === "POST") {
+        const worker = await env.DB.prepare(
+          "SELECT id, status FROM workers WHERE id = ?"
+        ).bind(workerId).first();
+        if (!worker) return json({ ok: false, error: "Worker not found." }, 404);
+        if (worker.status !== "active") {
+          return json({ ok: false, error: "Only active workers can receive credentials." }, 409);
+        }
+
+        const token = generateWorkerToken();
+        const tokenHash = await sha256Hex(token);
+        const credentialId = crypto.randomUUID();
+        await env.DB.batch([
+          env.DB.prepare(
+            "UPDATE worker_credentials SET status = 'revoked', revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE worker_id = ? AND status = 'active'"
+          ).bind(workerId),
+          env.DB.prepare(
+            "INSERT INTO worker_credentials (id, worker_id, token_hash) VALUES (?, ?, ?)"
+          ).bind(credentialId, workerId, tokenHash)
+        ]);
+        return json({
+          ok: true,
+          worker_id: workerId,
+          token,
+          warning: "This worker token is shown once. Store it in that worker's secret environment and do not share it."
+        }, 201);
+      }
+
+      if (method === "DELETE") {
+        const result = await env.DB.prepare(
+          "UPDATE worker_credentials SET status = 'revoked', revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE worker_id = ? AND status = 'active'"
+        ).bind(workerId).run();
+        return json({ ok: true, worker_id: workerId, revoked: result?.meta?.changes || 0 });
+      }
+      return json({ ok: false, error: "Method not allowed." }, 405);
+    }
+
     if (parts[1] === "workers" && parts.length === 4 && parts[3] === "tasks" && method === "GET") {
       const workerId = parts[2];
+      if (auth.type === "worker" && workerId !== auth.workerId) {
+        return json({ ok: false, error: "Worker credentials can only access their own tasks." }, 403);
+      }
       const worker = await env.DB.prepare("SELECT id FROM workers WHERE id = ?").bind(workerId).first();
       if (!worker) return json({ ok: false, error: "Worker not found." }, 404);
       const result = await env.DB.prepare(
-        "SELECT * FROM tasks WHERE assigned_worker_id = ? ORDER BY created_at DESC LIMIT 100"
+        "SELECT id, title, description, status, priority, requires_approval, created_at, updated_at FROM tasks WHERE assigned_worker_id = ? ORDER BY created_at DESC LIMIT 100"
       ).bind(workerId).all();
       return json({ ok: true, tasks: result.results || [] });
     }
@@ -679,9 +756,12 @@ async function handleApi(request, env, url) {
 
       if (method === "POST") {
         const body = await readJson(request);
-        const workerId = body?.worker_id;
+        const workerId = auth.type === "worker" ? auth.workerId : body?.worker_id;
         const summary = body?.summary;
         const content = body?.content;
+        if (auth.type === "worker" && body?.worker_id !== undefined && body.worker_id !== auth.workerId) {
+          return json({ ok: false, error: "Worker credentials cannot submit work as another worker." }, 403);
+        }
         if (typeof workerId !== "string" || !workerId.trim()) {
           return json({ ok: false, error: "A worker_id is required." }, 400);
         }

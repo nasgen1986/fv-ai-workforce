@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fv-ai-workforce-dispatcher-test",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-24",
+  "workers_dev": true,
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fv-ai-workforce-test-db",
+      "database_id": "bca306f6-65c8-4bfd-80f1-0d65ec77a16c",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

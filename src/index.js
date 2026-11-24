@@ -208,8 +208,8 @@ async function handleApi(request, env, url) {
 
       const assigned = await env.DB.batch([
         env.DB.prepare(
-          "UPDATE tasks SET status = 'assigned', assigned_worker_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'pending' AND assigned_worker_id IS NULL"
-        ).bind(selectedWorker.id, task.id),
+          "UPDATE tasks SET status = 'assigned', assigned_worker_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'pending' AND assigned_worker_id IS NULL AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active')"
+        ).bind(selectedWorker.id, task.id, selectedWorker.id),
         env.DB.prepare(
           "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'system', 'dispatcher', 'dispatcher_assigned', ? WHERE changes() = 1"
         ).bind(task.id, JSON.stringify({

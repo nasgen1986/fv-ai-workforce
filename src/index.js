@@ -118,7 +118,14 @@ async function handleApi(request, env, url) {
   const method = request.method;
   const path = url.pathname.replace(/\/$/, "");
   const parts = path.split("/").filter(Boolean);
-  const auth = await authenticate(request, env);
+  let auth;
+  try {
+    auth = await authenticate(request, env);
+  } catch {
+    // Fail closed if the credential store is unavailable; do not let auth
+    // lookup failures escape as an unhandled platform exception.
+    return json({ ok: false, error: "Authentication service unavailable." }, 503);
+  }
   if (auth === "not-configured") {
     return json({ ok: false, error: "API authentication is not configured yet." }, 503);
   }

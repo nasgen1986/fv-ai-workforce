@@ -503,10 +503,14 @@ async function handleApi(request, env, url) {
           max_tokens: 1024
         });
       } catch {
+        await env.DB.prepare(
+          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'in_progress'"
+        ).bind(taskId).run();
         await recordEvent(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
-          reason: "AI inference request failed"
+          reason: "AI inference request failed",
+          retry_requires_new_approval: true
         });
-        return json({ ok: false, error: "AI inference failed. The task remains in progress and can be reviewed or retried by a manager." }, 502);
+        return json({ ok: false, error: "AI inference failed. The task is marked failed. A manager may reset it to assigned, then request a new execution approval before retrying." }, 502);
       }
 
       const content =
@@ -515,10 +519,14 @@ async function handleApi(request, env, url) {
         (typeof result?.response === "string" ? result.response : "");
 
       if (typeof content !== "string" || !content.trim()) {
+        await env.DB.prepare(
+          "UPDATE tasks SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'in_progress'"
+        ).bind(taskId).run();
         await recordEvent(env.DB, taskId, "worker", worker.id, "ai_task_failed", {
-          reason: "AI returned no usable text"
+          reason: "AI returned no usable text",
+          retry_requires_new_approval: true
         });
-        return json({ ok: false, error: "AI returned no usable text. The task remains in progress for manager review." }, 502);
+        return json({ ok: false, error: "AI returned no usable text. The task is marked failed. A manager may reset it to assigned, then request a new execution approval before retrying." }, 502);
       }
 
       const submissionId = crypto.randomUUID();

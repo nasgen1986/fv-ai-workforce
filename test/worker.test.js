@@ -403,3 +403,94 @@ test("AI execution claim and approval consumption are atomic before inference", 
   assert.equal(aiCalled, true);
   assert.equal(batches.length, 2);
 });
+
+
+test("manual submission is inserted with its audit event in one guarded batch", async () => {
+  const task = { id: "task-1", status: "in_progress", requires_approval: 1 };
+  const assigned = {
+    id: "task-1",
+    status: "in_progress",
+    assigned_worker_id: "worker-1",
+    worker_status: "active",
+    requires_approval: 1
+  };
+  let batchCount = 0;
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            sql,
+            first: async () => {
+              if (sql.includes("SELECT id, status, requires_approval FROM tasks")) return task;
+              if (sql.includes("SELECT t.*, w.status AS worker_status")) return assigned;
+              if (sql.includes("SELECT id FROM approval_requests")) return { id: "approval-1" };
+              if (sql.includes("SELECT * FROM task_submissions WHERE id = ?")) {
+                return { id: "submission-1", task_id: "task-1", status: "submitted" };
+              }
+              throw new Error("Unexpected query in guarded submission test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      batchCount += 1;
+      assert.equal(statements.length, 2);
+      assert.match(statements[0].sql, /NOT EXISTS \(SELECT 1 FROM task_submissions/);
+      assert.match(statements[0].sql, /consumed_at IS NOT NULL/);
+      assert.match(statements[1].sql, /WHERE changes\(\) = 1/);
+      return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+    }
+  };
+  const response = await call("/api/tasks/task-1/submissions", {
+    method: "POST",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { worker_id: "worker-1", summary: "Completed research", content: "Research output" }
+  });
+  assert.equal(response.status, 201);
+  assert.equal(batchCount, 1);
+});
+
+test("manual submission rejects a duplicate pending submission without writing an audit event", async () => {
+  const task = { id: "task-1", status: "in_progress", requires_approval: 0 };
+  const assigned = {
+    id: "task-1",
+    status: "in_progress",
+    assigned_worker_id: "worker-1",
+    worker_status: "active",
+    requires_approval: 0
+  };
+  let batchCalled = false;
+  const db = {
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            sql,
+            first: async () => {
+              if (sql.includes("SELECT id, status, requires_approval FROM tasks")) return task;
+              if (sql.includes("SELECT t.*, w.status AS worker_status")) return assigned;
+              throw new Error("Unexpected query in duplicate submission test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      batchCalled = true;
+      assert.equal(statements.length, 2);
+      return [{ meta: { changes: 0 } }, { meta: { changes: 0 } }];
+    }
+  };
+  const response = await call("/api/tasks/task-1/submissions", {
+    method: "POST",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db },
+    body: { worker_id: "worker-1", summary: "Duplicate", content: "Duplicate output" }
+  });
+  assert.equal(response.status, 409);
+  assert.equal(batchCalled, true);
+  assert.match((await response.json()).error, /another submission is already awaiting review/i);
+});

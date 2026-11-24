@@ -305,6 +305,7 @@ test("AI execution cannot start without an unused task-specific approval", async
       return {
         bind() {
           return {
+            sql,
             first: async () => {
               if (sql === "SELECT * FROM tasks WHERE id = ?") return task;
               if (sql.includes("SELECT id FROM approval_requests")) return null;
@@ -351,6 +352,7 @@ test("AI execution claim and approval consumption are atomic before inference", 
       return {
         bind() {
           return {
+            sql,
             first: async () => {
               if (sql === "SELECT * FROM tasks WHERE id = ?") return task;
               if (sql.includes("SELECT id FROM approval_requests")) return approval;

@@ -291,9 +291,9 @@ test("worker can start only their assigned task with an active credential and co
       assert.match(statements[0].sql, /worker_credentials WHERE worker_id = \? AND token_hash = \? AND status = 'active'/);
       assert.match(statements[0].sql, /status = 'assigned'/);
       assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
-      assert.match(statements[1].sql, /changes\(\) = 1 ELSE json\(/);
+      assert.match(statements[1].sql, /changes\\(\\) = 1 THEN 1 ELSE json\\(/);
       assert.match(statements[2].sql, /consumed_at IS NULL AND changes\(\) = 1/);
-      assert.match(statements[3].sql, /changes\(\) = 1 ELSE json\(/);
+      assert.match(statements[3].sql, /changes\\(\\) = 1 THEN 1 ELSE json\\(/);
       assert.match(statements[4].sql, /worker_task_started/);
       assert.equal(statements[0].values[4], tokenHash);
       return [{ meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }];

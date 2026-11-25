@@ -725,8 +725,14 @@ async function handleApi(request, env, url) {
             "UPDATE tasks SET status = 'in_progress', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'assigned' AND assigned_worker_id = ? AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM approval_requests WHERE id = ? AND status = 'approved' AND consumed_at IS NULL)"
           ).bind(taskId, worker.id, worker.id, executionApproval.id),
           env.DB.prepare(
+            "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('ai_task_claim_conflict') END"
+          ),
+          env.DB.prepare(
             "UPDATE approval_requests SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'approved' AND consumed_at IS NULL AND changes() = 1"
           ).bind(executionApproval.id),
+          env.DB.prepare(
+            "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('ai_approval_consume_conflict') END"
+          ),
           env.DB.prepare(
             "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'system', 'approval_gate', 'execution_approval_consumed', ? WHERE changes() = 1"
           ).bind(taskId, JSON.stringify({ approval_id: executionApproval.id })),
@@ -738,8 +744,8 @@ async function handleApi(request, env, url) {
         return json({ ok: false, error: "Execution could not be safely initialized. No AI work was started; the task and approval were not changed." }, 500);
       }
 
-      if (executionStarted?.[0]?.meta?.changes === 0 ||
-          executionStarted?.[1]?.meta?.changes === 0) {
+      if (executionStarted?.[0]?.meta?.changes !== 1 ||
+          executionStarted?.[2]?.meta?.changes !== 1) {
         return json({ ok: false, error: "The task or manager approval is no longer available. Refresh and request a new approval if needed." }, 409);
       }
 

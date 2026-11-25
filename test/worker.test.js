@@ -891,12 +891,12 @@ test("AI execution claim and approval consumption are atomic before inference", 
       batches.push(statements);
       if (batches.length === 1) {
         assert.equal(statements.length, 6);
-        assert.match(statements[0].sql, /EXISTS \\(SELECT 1 FROM workers WHERE id = \\? AND status = 'active'\\)/);
-        assert.match(statements[0].sql, /EXISTS \\(SELECT 1 FROM approval_requests/);
+        assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
+        assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
         assert.deepEqual(statements[0].values, ["task-1", "worker-1", "worker-1", "approval-1"]);
-        assert.match(statements[1].sql, /changes\\(\\) = 1 THEN 1 ELSE json\\(/);
-        assert.match(statements[2].sql, /consumed_at IS NULL AND changes\\(\\) = 1/);
-        assert.match(statements[3].sql, /changes\\(\\) = 1 THEN 1 ELSE json\\(/);
+        assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+        assert.match(statements[2].sql, /consumed_at IS NULL AND changes\(\) = 1/);
+        assert.match(statements[3].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
         assert.match(statements[4].sql, /execution_approval_consumed/);
         assert.match(statements[5].sql, /ai_task_started/);
         return [

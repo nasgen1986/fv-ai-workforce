@@ -399,5 +399,122 @@ class MigrationAndTransactionTests(unittest.TestCase):
         )
 
 
+    def test_worker_task_start_consumes_approval_and_audits_as_one_batch(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status) VALUES ('worker-1', 'Worker', 'research', 'active')"
+        )
+        self.seed_task(status="assigned")
+        self.db.execute("UPDATE tasks SET assigned_worker_id='worker-1' WHERE id='task-1'")
+        self.db.execute(
+            "INSERT INTO worker_credentials (id, worker_id, token_hash) VALUES ('credential-1', 'worker-1', ?)",
+            ("a" * 64,),
+        )
+        self.db.execute(
+            "INSERT INTO approval_requests (id, task_id, action_type, summary, status) "
+            "VALUES ('approval-1', 'task-1', 'task_execution', 'Start task', 'approved')"
+        )
+
+        self.db.execute("BEGIN")
+        self.db.execute(
+            "UPDATE tasks SET status='in_progress' WHERE id='task-1' "
+            "AND status='assigned' AND assigned_worker_id='worker-1' "
+            "AND EXISTS (SELECT 1 FROM workers WHERE id='worker-1' AND status='active') "
+            "AND EXISTS (SELECT 1 FROM worker_credentials WHERE worker_id='worker-1' "
+            "AND token_hash=? AND status='active') "
+            "AND EXISTS (SELECT 1 FROM approval_requests WHERE id='approval-1' "
+            "AND status='approved' AND consumed_at IS NULL)",
+            ("a" * 64,),
+        )
+        self.db.execute(
+            "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('worker_task_start_conflict') END"
+        )
+        self.db.execute(
+            "UPDATE approval_requests SET consumed_at='now' WHERE id='approval-1' "
+            "AND status='approved' AND consumed_at IS NULL AND changes()=1"
+        )
+        self.db.execute(
+            "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('worker_approval_consume_conflict') END"
+        )
+        self.db.execute(
+            "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) "
+            "SELECT 'task-1', 'worker', 'worker-1', 'worker_task_started', '{}' WHERE changes()=1"
+        )
+        self.db.execute("COMMIT")
+
+        self.assertEqual(
+            self.db.execute("SELECT status FROM tasks WHERE id='task-1'").fetchone()[0],
+            "in_progress",
+        )
+        self.assertIsNotNone(
+            self.db.execute("SELECT consumed_at FROM approval_requests WHERE id='approval-1'").fetchone()[0]
+        )
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='worker_task_started'").fetchone()[0],
+            1,
+        )
+
+    def test_worker_task_start_guard_rolls_back_partial_start_if_approval_cannot_be_consumed(self):
+        self.db.execute(
+            "INSERT INTO workers (id, name, role, status) VALUES ('worker-1', 'Worker', 'research', 'active')"
+        )
+        self.seed_task(status="assigned")
+        self.db.execute("UPDATE tasks SET assigned_worker_id='worker-1' WHERE id='task-1'")
+        self.db.execute(
+            "INSERT INTO worker_credentials (id, worker_id, token_hash) VALUES ('credential-1', 'worker-1', ?)",
+            ("a" * 64,),
+        )
+        self.db.execute(
+            "INSERT INTO approval_requests (id, task_id, action_type, summary, status) "
+            "VALUES ('approval-1', 'task-1', 'task_execution', 'Start task', 'approved')"
+        )
+        self.db.executescript(
+            "CREATE TRIGGER ignore_worker_start_approval BEFORE UPDATE ON approval_requests "
+            "WHEN OLD.id = 'approval-1' BEGIN SELECT RAISE(IGNORE); END;"
+        )
+
+        self.db.execute("BEGIN")
+        try:
+            self.db.execute(
+                "UPDATE tasks SET status='in_progress' WHERE id='task-1' "
+                "AND status='assigned' AND assigned_worker_id='worker-1' "
+                "AND EXISTS (SELECT 1 FROM workers WHERE id='worker-1' AND status='active') "
+                "AND EXISTS (SELECT 1 FROM worker_credentials WHERE worker_id='worker-1' "
+                "AND token_hash=? AND status='active') "
+                "AND EXISTS (SELECT 1 FROM approval_requests WHERE id='approval-1' "
+                "AND status='approved' AND consumed_at IS NULL)",
+                ("a" * 64,),
+            )
+            self.db.execute(
+                "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('worker_task_start_conflict') END"
+            )
+            self.db.execute(
+                "UPDATE approval_requests SET consumed_at='now' WHERE id='approval-1' "
+                "AND status='approved' AND consumed_at IS NULL AND changes()=1"
+            )
+            self.db.execute(
+                "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('worker_approval_consume_conflict') END"
+            )
+            self.db.execute(
+                "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) "
+                "SELECT 'task-1', 'worker', 'worker-1', 'worker_task_started', '{}' WHERE changes()=1"
+            )
+            self.db.execute("COMMIT")
+        except sqlite3.DatabaseError:
+            self.db.execute("ROLLBACK")
+
+        self.assertEqual(
+            self.db.execute("SELECT status FROM tasks WHERE id='task-1'").fetchone()[0],
+            "assigned",
+        )
+        self.assertIsNone(
+            self.db.execute("SELECT consumed_at FROM approval_requests WHERE id='approval-1'").fetchone()[0]
+        )
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='worker_task_started'").fetchone()[0],
+            0,
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()

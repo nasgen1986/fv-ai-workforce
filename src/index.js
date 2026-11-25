@@ -553,14 +553,17 @@ async function handleApi(request, env, url) {
         const token = generateWorkerToken();
         const tokenHash = await sha256Hex(token);
         const credentialId = crypto.randomUUID();
-        await env.DB.batch([
+        const issued = await env.DB.batch([
           env.DB.prepare(
-            "UPDATE worker_credentials SET status = 'revoked', revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE worker_id = ? AND status = 'active'"
-          ).bind(workerId),
+            "UPDATE worker_credentials SET status = 'revoked', revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE worker_id = ? AND status = 'active' AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active')"
+          ).bind(workerId, workerId),
           env.DB.prepare(
-            "INSERT INTO worker_credentials (id, worker_id, token_hash) VALUES (?, ?, ?)"
-          ).bind(credentialId, workerId, tokenHash)
+            "INSERT INTO worker_credentials (id, worker_id, token_hash) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active')"
+          ).bind(credentialId, workerId, tokenHash, workerId)
         ]);
+        if (issued?.[1]?.meta?.changes !== 1) {
+          return json({ ok: false, error: "Worker became inactive before the credential could be issued. No credential was created." }, 409);
+        }
         return json({
           ok: true,
           worker_id: workerId,

@@ -108,7 +108,19 @@ try {
   execute(
     `UPDATE approval_requests SET consumed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=${sqlString(approvalId)} AND status='approved' AND consumed_at IS NULL`
   );
-  assert.equal(scalar(execute(`SELECT COUNT(*) AS count FROM approval_requests WHERE id=${sqlString(approvalId)} AND consumed_at IS NOT NULL`), "count"), 1);
+  const firstConsumption = scalar(
+    execute(`SELECT consumed_at FROM approval_requests WHERE id=${sqlString(approvalId)}`),
+    "consumed_at"
+  );
+  assert.ok(firstConsumption, "The approved execution must be marked consumed.");
+  execute(
+    `UPDATE approval_requests SET consumed_at='SHOULD_NOT_BE_RECONSUMED' WHERE id=${sqlString(approvalId)} AND status='approved' AND consumed_at IS NULL`
+  );
+  assert.equal(
+    scalar(execute(`SELECT consumed_at FROM approval_requests WHERE id=${sqlString(approvalId)}`), "consumed_at"),
+    firstConsumption,
+    "A consumed approval must not be consumed a second time."
+  );
   passed++;
 
   execute(
@@ -119,7 +131,21 @@ try {
 
   console.log(`PASS: ${passed} remote TEST D1 integration checks completed.`);
 } finally {
+  // Attempt both cleanup operations even if one fails. Delete the task first because
+  // it references the worker; task-owned approvals, submissions, and events cascade.
   // Remove only this run's uniquely named test records. Never truncate or reset tables.
-  execute(`DELETE FROM tasks WHERE id=${sqlString(taskId)}`);
-  execute(`DELETE FROM workers WHERE id=${sqlString(workerId)}`);
+  const cleanupErrors = [];
+  for (const statement of [
+    `DELETE FROM tasks WHERE id=${sqlString(taskId)}`,
+    `DELETE FROM workers WHERE id=${sqlString(workerId)}`
+  ]) {
+    try {
+      execute(statement);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (cleanupErrors.length) {
+    throw new Error(`Remote D1 cleanup failed for ${cleanupErrors.length} statement(s): ${cleanupErrors.map((error) => error.message).join(" | ")}`);
+  }
 }

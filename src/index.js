@@ -135,9 +135,11 @@ async function handleApi(request, env, url) {
   if (auth.type === "worker") {
     const ownTaskList = method === "GET" && parts[1] === "workers" &&
       parts.length === 4 && parts[2] === auth.workerId && parts[3] === "tasks";
+    const ownTaskStart = method === "POST" && parts[1] === "tasks" &&
+      parts.length === 4 && parts[3] === "start";
     const ownSubmission = method === "POST" && parts[1] === "tasks" &&
       parts.length === 4 && parts[3] === "submissions";
-    if (!ownTaskList && !ownSubmission) {
+    if (!ownTaskList && !ownTaskStart && !ownSubmission) {
       return json({ ok: false, error: "Worker credentials cannot access manager routes or another worker's resources." }, 403);
     }
   }
@@ -579,6 +581,63 @@ async function handleApi(request, env, url) {
         return json({ ok: true, worker_id: workerId, revoked: result?.meta?.changes || 0 });
       }
       return json({ ok: false, error: "Method not allowed." }, 405);
+    }
+
+    if (parts[1] === "tasks" && parts.length === 4 && parts[3] === "start" && method === "POST") {
+      if (auth.type !== "worker") {
+        return json({ ok: false, error: "Only the assigned worker credential can start this task." }, 403);
+      }
+
+      const taskId = parts[2];
+      const task = await env.DB.prepare(
+        "SELECT id, status, assigned_worker_id, requires_approval FROM tasks WHERE id = ?"
+      ).bind(taskId).first();
+      if (!task) return json({ ok: false, error: "Task not found." }, 404);
+      if (task.assigned_worker_id !== auth.workerId) {
+        return json({ ok: false, error: "This task is not assigned to the authenticated worker." }, 403);
+      }
+      if (task.status !== "assigned") {
+        return json({ ok: false, error: "Only assigned tasks can be started." }, 409);
+      }
+
+      let approvalId = null;
+      if (task.requires_approval === 1) {
+        const approval = await env.DB.prepare(
+          "SELECT id FROM approval_requests WHERE task_id = ? AND action_type = 'task_execution' AND status = 'approved' AND consumed_at IS NULL ORDER BY decided_at DESC LIMIT 1"
+        ).bind(taskId).first();
+        if (!approval) {
+          return json({ ok: false, error: "A current, unused manager approval is required before this task can start." }, 403);
+        }
+        approvalId = approval.id;
+      }
+
+      const statements = [
+        env.DB.prepare(
+          "UPDATE tasks SET status = 'in_progress', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'assigned' AND assigned_worker_id = ? AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM worker_credentials WHERE worker_id = ? AND token_hash = ? AND status = 'active') AND (? = 0 OR EXISTS (SELECT 1 FROM approval_requests WHERE id = ? AND status = 'approved' AND consumed_at IS NULL))"
+        ).bind(taskId, auth.workerId, auth.workerId, auth.workerId, auth.tokenHash, task.requires_approval, approvalId),
+      ];
+      if (approvalId) {
+        statements.push(
+          env.DB.prepare(
+            "UPDATE approval_requests SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'approved' AND consumed_at IS NULL AND changes() = 1"
+          ).bind(approvalId)
+        );
+      }
+      statements.push(
+        env.DB.prepare(
+          "INSERT INTO task_events (task_id, actor_type, actor_id, event_type, payload_json) SELECT ?, 'worker', ?, 'worker_task_started', ? WHERE changes() = 1"
+        ).bind(taskId, auth.workerId, JSON.stringify({ approval_id: approvalId }))
+      );
+
+      const started = await env.DB.batch(statements);
+      if (started?.[0]?.meta?.changes !== 1 ||
+          (approvalId && started?.[1]?.meta?.changes !== 1)) {
+        return json({ ok: false, error: "The task, worker credential, or manager approval is no longer available. Refresh and try again." }, 409);
+      }
+      const updatedTask = await env.DB.prepare(
+        "SELECT id, status, assigned_worker_id, requires_approval, updated_at FROM tasks WHERE id = ?"
+      ).bind(taskId).first();
+      return json({ ok: true, task: updatedTask, message: "Task started. No AI inference or external action was performed." });
     }
 
     if (parts[1] === "workers" && parts.length === 4 && parts[3] === "tasks" && method === "GET") {

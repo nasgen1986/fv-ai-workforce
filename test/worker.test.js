@@ -256,6 +256,107 @@ test("worker credentials can read only their own assigned task summaries", async
   assert.equal((await response.json()).tasks[0].id, "task-1");
 });
 
+test("worker can start only their assigned task with an active credential and consumes required approval atomically", async () => {
+  const workerToken = "worker-token-test-which-is-43-characters-long";
+  const tokenHash = await sha256HexForTest(workerToken);
+  const statementsSeen = [];
+  const task = {
+    id: "task-start",
+    status: "assigned",
+    assigned_worker_id: "worker-1",
+    requires_approval: 1
+  };
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          return {
+            sql, values,
+            first: async () => {
+              if (sql.includes("worker_credentials")) return { worker_id: "worker-1" };
+              if (sql.includes("SELECT id, status, assigned_worker_id, requires_approval FROM tasks")) return task;
+              if (sql.includes("SELECT id FROM approval_requests")) return { id: "approval-1" };
+              if (sql.includes("SELECT id, status, assigned_worker_id, requires_approval, updated_at FROM tasks")) {
+                return { ...task, status: "in_progress" };
+              }
+              throw new Error("Unexpected query in worker task start test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch(statements) {
+      statementsSeen.push(...statements);
+      assert.equal(statements.length, 3);
+      assert.match(statements[0].sql, /worker_credentials WHERE worker_id = \? AND token_hash = \? AND status = 'active'/);
+      assert.match(statements[0].sql, /status = 'assigned'/);
+      assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
+      assert.match(statements[1].sql, /consumed_at IS NULL AND changes\(\) = 1/);
+      assert.match(statements[2].sql, /worker_task_started/);
+      assert.equal(statements[0].values[4], tokenHash);
+      return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }, { meta: { changes: 1 } }];
+    }
+  };
+  const response = await call("/api/tasks/task-start/start", {
+    method: "POST",
+    token: workerToken,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db }
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.task.status, "in_progress");
+  assert.match(body.message, /No AI inference/);
+  assert.equal(statementsSeen.length, 3);
+});
+
+test("worker cannot start another worker's task or bypass missing manager approval", async () => {
+  const workerToken = "worker-token-test-which-is-43-characters-long";
+  const dbFor = (task, approval = null) => ({
+    prepare(sql) {
+      return {
+        bind() {
+          return {
+            first: async () => {
+              if (sql.includes("worker_credentials")) return { worker_id: "worker-1" };
+              if (sql.includes("SELECT id, status, assigned_worker_id, requires_approval FROM tasks")) return task;
+              if (sql.includes("SELECT id FROM approval_requests")) return approval;
+              throw new Error("Unexpected query in worker task start denial test: " + sql);
+            }
+          };
+        }
+      };
+    },
+    async batch() { throw new Error("No write should occur for a rejected start."); }
+  });
+  const wrongWorker = await call("/api/tasks/task-start/start", {
+    method: "POST",
+    token: workerToken,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: dbFor({
+      id: "task-start", status: "assigned", assigned_worker_id: "worker-2", requires_approval: 1
+    }) }
+  });
+  assert.equal(wrongWorker.status, 403);
+
+  const noApproval = await call("/api/tasks/task-start/start", {
+    method: "POST",
+    token: workerToken,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: dbFor({
+      id: "task-start", status: "assigned", assigned_worker_id: "worker-1", requires_approval: 1
+    }) }
+  });
+  assert.equal(noApproval.status, 403);
+  assert.match((await noApproval.json()).error, /manager approval is required/i);
+});
+
+test("manager credential cannot use the worker task-start route", async () => {
+  const response = await call("/api/tasks/task-start/start", {
+    method: "POST",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: {} }
+  });
+  assert.equal(response.status, 403);
+});
+
 test("worker submissions derive identity from the credential, not request body", async () => {
   const workerToken = "worker-token-test-which-is-43-characters-long";
   const expectedHash = await sha256HexForTest(workerToken);

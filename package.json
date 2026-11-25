@@ -8,7 +8,8 @@
     "dev": "wrangler dev --config wrangler.test.example.jsonc",
     "deploy": "wrangler deploy --config wrangler.test.example.jsonc",
     "check": "wrangler deploy --dry-run --config wrangler.test.example.jsonc",
-    "test": "node --test"
+    "test": "node --test",
+    "test:d1:remote": "node test/d1_remote_integration.js"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

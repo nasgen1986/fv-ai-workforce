@@ -33,7 +33,10 @@ jobs:
       - name: Validate test Worker bundle (dry run only)
         run: npm run check
 
+  # Never expose the Cloudflare secret to pull-request code. Remote D1 writes
+  # are allowed only from the protected TEST branch or a manual run on that branch.
   remote-d1-integration:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/feature/dispatcher-foundation'
     runs-on: ubuntu-latest
     concurrency:
       group: fv-ai-workforce-test-d1-remote

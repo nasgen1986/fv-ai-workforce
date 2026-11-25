@@ -11,20 +11,20 @@ const approvalId = `d1test_approval_${suffix}`;
 const submissionId = `d1test_submission_${suffix}`;
 const credentialId1 = `d1test_credential_a_${suffix}`;
 const credentialId2 = `d1test_credential_b_${suffix}`;
-const hash1 = "a".repeat(64);
-const hash2 = "b".repeat(64);
+const hash1 = randomUUID().replaceAll("-", "").padEnd(64, "a").slice(0, 64);
+const hash2 = randomUUID().replaceAll("-", "").padEnd(64, "b").slice(0, 64);
 
 function sqlString(value) {
   return "'" + String(value).replaceAll("'", "''") + "'";
 }
 
-function execute(sql, expectedToFail = false) {
+function execute(sql, expectedFailureText = null) {
   try {
     const stdout = execFileSync("npx", [
       "wrangler", "d1", "execute", database,
       "--remote", "--command", sql, "--json", "--config", config
     ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    if (expectedToFail) {
+    if (expectedFailureText) {
       throw new Error("Expected D1 statement to fail, but it succeeded.");
     }
     const trimmed = stdout.trim();
@@ -38,9 +38,9 @@ function execute(sql, expectedToFail = false) {
     }
     return parsed;
   } catch (error) {
-    if (expectedToFail && error.status !== 0) return null;
-    const detail = error.stderr?.toString().slice(-1200) || error.message;
-    throw new Error("Remote D1 command failed: " + detail);
+    const detail = error.stderr?.toString() || error.message;
+    if (expectedFailureText && error.status !== 0 && detail.includes(expectedFailureText)) return null;
+    throw new Error("Remote D1 command failed: " + detail.slice(-1200));
   }
 }
 
@@ -88,7 +88,7 @@ try {
   );
   const duplicateActive = execute(
     `INSERT INTO worker_credentials (id,worker_id,token_hash) VALUES (${sqlString(credentialId2)},${sqlString(workerId)},${sqlString(hash2)})`,
-    true
+    "UNIQUE constraint failed: worker_credentials.worker_id"
   );
   assert.equal(duplicateActive, null, "Only one active credential per worker must be allowed.");
   passed++;

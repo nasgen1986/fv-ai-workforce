@@ -873,6 +873,7 @@ test("AI execution claim and approval consumption are atomic before inference", 
   const db = {
     prepare(sql) {
       return {
+        sql,
         bind(...values) {
           return {
             sql,

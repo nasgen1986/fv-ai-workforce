@@ -486,7 +486,7 @@ test("manager can issue one-time worker tokens without storing plaintext", async
       insertedValues = statements[1].values;
       assert.match(statements[0].sql, /UPDATE worker_credentials/);
       assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
-      assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+      assert.match(statements[1].sql, /INSERT INTO worker_credentials .* SELECT .* WHERE EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
       return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
     }
   };
@@ -515,7 +515,7 @@ test("worker credential issuance fails closed if the worker becomes inactive bef
     },
     async batch(statements) {
       assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
-      assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+      assert.match(statements[1].sql, /INSERT INTO worker_credentials .* SELECT .* WHERE EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
       return [{ meta: { changes: 0 } }, { meta: { changes: 0 } }];
     }
   };
@@ -706,7 +706,7 @@ test("failed task can only be reset to assigned with an active assigned worker",
     async batch(statements) {
       assert.equal(statements.length, 2);
       assert.match(statements[0].sql, /WHERE id = \? AND status = \?/);
-      assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+      assert.match(statements[1].sql, /WHERE changes\(\) = 1/);
       return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
     }
   };
@@ -752,7 +752,7 @@ test("submission review uses one atomic D1 batch for submission, task, and audit
       batchCount += 1;
       assert.equal(statements.length, 3);
       assert.match(statements[0].sql, /status = 'submitted'/);
-      assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+      assert.match(statements[1].sql, /changes\(\) = 1/);
       assert.match(statements[2].sql, /changes\(\) = 1/);
       return [
         { meta: { changes: 1 } },
@@ -893,7 +893,7 @@ test("AI execution claim and approval consumption are atomic before inference", 
         assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
         assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM approval_requests/);
         assert.deepEqual(statements[0].values, ["task-1", "worker-1", "worker-1", "approval-1"]);
-      assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+      assert.match(statements[1].sql, /changes\(\) = 1/);
         assert.match(statements[2].sql, /changes\(\) = 1/);
         return [
           { meta: { changes: 1 } },
@@ -904,7 +904,7 @@ test("AI execution claim and approval consumption are atomic before inference", 
       }
       assert.equal(statements.length, 2);
       assert.match(statements[0].sql, /status = 'failed'/);
-      assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+      assert.match(statements[1].sql, /changes\(\) = 1/);
       return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
     }
   };
@@ -964,7 +964,7 @@ test("manual submission is inserted with its audit event in one guarded batch", 
       assert.equal(statements.length, 2);
       assert.match(statements[0].sql, /NOT EXISTS \(SELECT 1 FROM task_submissions/);
       assert.match(statements[0].sql, /consumed_at IS NOT NULL/);
-      assert.match(statements[1].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
+      assert.match(statements[1].sql, /WHERE changes\(\) = 1/);
       return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
     }
   };

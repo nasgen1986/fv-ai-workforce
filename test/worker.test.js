@@ -286,8 +286,9 @@ test("worker can start only their assigned task with an active credential and co
       };
     },
     async batch(statements) {
-      statementsSeen.push(...statements);
-      assert.equal(statements.length, 5);
+      try {
+        statementsSeen.push(...statements);
+        assert.equal(statements.length, 5);
       assert.match(statements[0].sql, /worker_credentials WHERE worker_id = \? AND token_hash = \? AND status = 'active'/);
       assert.match(statements[0].sql, /status = 'assigned'/);
       assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
@@ -296,7 +297,11 @@ test("worker can start only their assigned task with an active credential and co
       assert.match(statements[3].sql, /changes\(\) = 1 THEN 1 ELSE json\(/);
       assert.match(statements[4].sql, /worker_task_started/);
       assert.equal(statements[0].values[4], tokenHash);
-      return [{ meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }];
+        return [{ meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }];
+      } catch (error) {
+        console.error("worker task-start mock batch failure:", error);
+        throw error;
+      }
     }
   };
   const response = await call("/api/tasks/task-start/start", {

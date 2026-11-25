@@ -382,7 +382,8 @@ test("manager can issue one-time worker tokens without storing plaintext", async
     async batch(statements) {
       insertedValues = statements[1].values;
       assert.match(statements[0].sql, /UPDATE worker_credentials/);
-      assert.match(statements[1].sql, /INSERT INTO worker_credentials/);
+      assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
+      assert.match(statements[1].sql, /INSERT INTO worker_credentials .* SELECT .* WHERE EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
       return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
     }
   };
@@ -398,6 +399,32 @@ test("manager can issue one-time worker tokens without storing plaintext", async
   assert.match(insertedValues[2], /^[a-f0-9]{64}$/);
   assert.notEqual(insertedValues[2], body.token);
   assert.equal(insertedValues.includes(body.token), false);
+});
+
+test("worker credential issuance fails closed if the worker becomes inactive before the atomic insert", async () => {
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          return { sql, values, first: async () => ({ id: "worker-1", status: "active" }) };
+        }
+      };
+    },
+    async batch(statements) {
+      assert.match(statements[0].sql, /EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
+      assert.match(statements[1].sql, /INSERT INTO worker_credentials .* SELECT .* WHERE EXISTS \(SELECT 1 FROM workers WHERE id = \? AND status = 'active'\)/);
+      return [{ meta: { changes: 0 } }, { meta: { changes: 0 } }];
+    }
+  };
+  const response = await call("/api/workers/worker-1/credentials", {
+    method: "POST",
+    token: TOKEN,
+    env: { WORKFORCE_API_TOKEN: TOKEN, DB: db }
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /became inactive/i);
 });
 
 test("AI task execution stays disabled unless explicitly enabled", async () => {

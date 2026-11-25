@@ -615,12 +615,20 @@ async function handleApi(request, env, url) {
         env.DB.prepare(
           "UPDATE tasks SET status = 'in_progress', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'assigned' AND assigned_worker_id = ? AND EXISTS (SELECT 1 FROM workers WHERE id = ? AND status = 'active') AND EXISTS (SELECT 1 FROM worker_credentials WHERE worker_id = ? AND token_hash = ? AND status = 'active') AND (? = 0 OR EXISTS (SELECT 1 FROM approval_requests WHERE id = ? AND status = 'approved' AND consumed_at IS NULL))"
         ).bind(taskId, auth.workerId, auth.workerId, auth.workerId, auth.tokenHash, task.requires_approval, approvalId),
+        // D1 batch rolls back when any statement errors. Force a rollback if
+        // a conditional update affects zero rows, preventing partial starts.
+        env.DB.prepare(
+          "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('worker_task_start_conflict') END"
+        ),
       ];
       if (approvalId) {
         statements.push(
           env.DB.prepare(
             "UPDATE approval_requests SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'approved' AND consumed_at IS NULL AND changes() = 1"
-          ).bind(approvalId)
+          ).bind(approvalId),
+          env.DB.prepare(
+            "SELECT CASE WHEN changes() = 1 THEN 1 ELSE json('worker_approval_consume_conflict') END"
+          )
         );
       }
       statements.push(
@@ -631,7 +639,7 @@ async function handleApi(request, env, url) {
 
       const started = await env.DB.batch(statements);
       if (started?.[0]?.meta?.changes !== 1 ||
-          (approvalId && started?.[1]?.meta?.changes !== 1)) {
+          (approvalId && started?.[2]?.meta?.changes !== 1)) {
         return json({ ok: false, error: "The task, worker credential, or manager approval is no longer available. Refresh and try again." }, 409);
       }
       const updatedTask = await env.DB.prepare(

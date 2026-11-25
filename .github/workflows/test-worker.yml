@@ -24,6 +24,8 @@ jobs:
           node-version: 24
       - name: Install dependencies
         run: npm install
+      - name: Validate remote D1 integration test syntax
+        run: node --check test/d1_remote_integration.js
       - name: Run isolated API safety tests (no deployment or AI inference)
         run: npm test
       - name: Run SQLite migration and transaction compatibility tests
@@ -33,6 +35,9 @@ jobs:
 
   remote-d1-integration:
     runs-on: ubuntu-latest
+    concurrency:
+      group: fv-ai-workforce-test-d1-remote
+      cancel-in-progress: false
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: "74ee77ac4b1afa4f125bb984c44d7235"

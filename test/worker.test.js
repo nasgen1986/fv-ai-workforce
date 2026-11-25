@@ -269,6 +269,7 @@ test("worker can start only their assigned task with an active credential and co
   const db = {
     prepare(sql) {
       return {
+        sql,
         bind(...values) {
           return {
             sql, values,
@@ -299,7 +300,6 @@ test("worker can start only their assigned task with an active credential and co
       assert.equal(statements[0].values[4], tokenHash);
         return [{ meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }, { results: [{ ok: 1 }] }, { meta: { changes: 1 } }];
       } catch (error) {
-        console.error("worker task-start mock batch failure:", error);
         throw error;
       }
     }

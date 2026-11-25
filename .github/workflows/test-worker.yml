@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: npm install
       - name: Validate remote D1 integration test syntax
-        run: node --check test/d1_remote_integration.js
+        run: node --check scripts/d1_remote_integration.js
       - name: Run isolated API safety tests (no deployment or AI inference)
         run: npm test
       - name: Run SQLite migration and transaction compatibility tests

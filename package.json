@@ -5,9 +5,11 @@
   "description": "Free-first cloud foundation for the FlipTop Vault AI Workforce",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "check": "wrangler deploy --dry-run"
+    "dev": "wrangler dev --config wrangler.test.example.jsonc",
+    "deploy": "wrangler deploy --config wrangler.test.example.jsonc",
+    "check": "wrangler deploy --dry-run --config wrangler.test.example.jsonc",
+    "test": "node --test",
+    "test:d1:remote": "node scripts/d1_remote_integration.js"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

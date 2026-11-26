@@ -1,0 +1,77 @@
+name: Test Worker safety checks
+
+on:
+  push:
+    branches:
+      - feature/dispatcher-foundation
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run-test-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install dependencies
+        run: npm install
+      - name: Validate remote D1 integration test syntax
+        run: node --check scripts/d1_remote_integration.js
+      - name: Run isolated API safety tests (no deployment or AI inference)
+        run: npm test
+      - name: Run SQLite migration and transaction compatibility tests
+        run: python3 test/migrations_test.py
+      - name: Validate test Worker bundle (dry run only)
+        run: npm run check
+
+  # Never expose the Cloudflare secret to pull-request code. Remote D1 writes
+  # are allowed only from the protected TEST branch or a manual run on that branch.
+  remote-d1-integration:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/feature/dispatcher-foundation'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: fv-ai-workforce-test-d1-remote
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_ACCOUNT_ID: "74ee77ac4b1afa4f125bb984c44d7235"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Check whether the TEST-only Cloudflare token is configured
+        id: token-check
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        shell: bash
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "A Cloudflare token is configured; remote TEST D1 checks are enabled."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "SKIPPED - configure CLOUDFLARE_API_TOKEN with access limited to the TEST D1 database."
+          fi
+      - name: Install dependencies
+        run: npm install
+      - name: Apply migrations to the isolated TEST D1 database
+        if: steps.token-check.outputs.configured == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler d1 migrations apply fv-ai-workforce-test-db --remote --config wrangler.test.example.jsonc
+      - name: Run isolated remote D1 CRUD and constraint checks
+        if: steps.token-check.outputs.configured == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run test:d1:remote
